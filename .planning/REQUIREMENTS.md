@@ -63,7 +63,32 @@ Adicionar depois do v1 estar a correr de forma estável em conta demo.
 
 ## Traceability
 
-(Preenchido pelo roadmapper)
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| VALID-01 | Phase 1 | Pending |
+| VALID-02 | Phase 1 | Pending |
+| RISK-01 | Phase 2 | Pending |
+| RISK-02 | Phase 2 | Pending |
+| RISK-03 | Phase 2 | Pending |
+| RISK-04 | Phase 2 | Pending |
+| RISK-05 | Phase 2 | Pending |
+| RISK-06 | Phase 2 | Pending |
+| RISK-07 | Phase 2 | Pending |
+| RISK-08 | Phase 2 | Pending |
+| RISK-09 | Phase 2 | Pending |
+| HEDGE-01 | Phase 3 | Pending |
+| HEDGE-02 | Phase 3 | Pending |
+| HEDGE-03 | Phase 3 | Pending |
+| EA-01 | Phase 4 | Pending |
+| EA-02 | Phase 4 | Pending |
+| EA-03 | Phase 4 | Pending |
+| EA-04 | Phase 4 | Pending |
+| EA-05 | Phase 4 | Pending |
+| ALERT-01 | Phase 4 | Pending |
+
+**Coverage:** 20/20 v1 requirements mapped. No orphans.
+
+v2 requirements (ML-01, REGIME-01, REGIME-02, AUTOGATE-01, DIVERGE-01) are intentionally unmapped — deferred to a future milestone per their stated triggers, after Phases 1-4 run stably on a demo account.
 
 ---
 *Last updated: 2026-06-30*
