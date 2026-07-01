@@ -214,13 +214,23 @@ validação no histórico real.
   para começar, vale revisitar se a procura demorar demasiado a encontrar
   estratégias válidas.
 - ~~Não há ainda separação explícita treino/validação dentro do próprio
-  backtest~~ — **RESOLVIDO no plan 01-03 desta fase (mecanismo de
-  VALID-01).** `backtest_engine.walk_forward_validate()` revalida
-  parâmetros já fixos/aprovados em folds sequenciais rolling out-of-sample
-  (ver secção "Metodologia walk-forward" acima). O gap que resta é a
-  EXECUÇÃO desta revalidação contra dados reais de uma estratégia já
-  aprovada e a marcação de `revalidated_on_real_data=True` — isso é o
-  plan 01-04 desta fase, ainda não corrido.
+  backtest~~ — **RESOLVIDO nos plans 01-03 e 01-04 desta fase (VALID-01).**
+  `backtest_engine.walk_forward_validate()` revalida parâmetros já
+  fixos/aprovados em folds sequenciais rolling out-of-sample (ver secção
+  "Metodologia walk-forward" acima), e `src/revalidate_walk_forward.py`
+  (plan 01-04) é o ponto de entrada executável que corre esse mecanismo
+  contra os dados de mercado já em disco para cada estratégia ✅ Aprovada,
+  persistindo o veredito (`wf_passed`, `wf_fold_results`) via
+  `save_walk_forward_result()`; o dashboard mostra o detalhe fold-a-fold e
+  um badge de revalidação. O gap de metodologia está fechado — o que
+  resta é um requisito de ELEGIBILIDADE PARA PRODUÇÃO, não de mecanismo:
+  VALID-01 só é considerado satisfeito para uma estratégia quando
+  `revalidated_on_real_data=True`, o que exige uma corrida CONFIRMADA
+  contra dados reais (`data_pipeline.py --mode mt5`, nunca `--mode synth`
+  ou fallback CSV-import). Uma estratégia com `wf_passed=True` mas
+  `revalidated_on_real_data=False` NÃO está pronta para produção — ver
+  "Metodologia walk-forward" acima e o registo de estado real-vs-fallback
+  em `.planning/phases/01-walk-forward-cost-aware-validation/01-04-SUMMARY.md`.
 - ~~O backtest não modela custos de transação~~ — **RESOLVIDO no plan
   01-02 desta fase (VALID-02).** `run_hedge_backtest()` subtrai spread,
   slippage e comissão de `pnl_r` no momento em que cada trade fecha (ver

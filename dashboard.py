@@ -20,11 +20,23 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
-from strategy_registry import list_strategies  # noqa: E402
+from strategy_registry import init_db, list_strategies  # noqa: E402
 
 st.set_page_config(page_title="Forex AI — Strategy Lab", layout="wide", page_icon="🔬")
 
 DB_PATH = os.environ.get("STRATEGY_DB", os.path.join("output", "strategy_lab.db"))
+
+# Garante que o schema (incluindo as colunas de walk-forward de 01-03:
+# wf_passed / wf_fold_results / revalidated_on_real_data, e cost_model_version
+# de 01-02) está presente ANTES de qualquer list_strategies() correr. init_db()
+# é seguro chamar num DB já existente — migrate_add_cost_columns() e
+# migrate_add_walk_forward_columns() são aditivas e idempotentes (só fazem
+# ALTER TABLE se a coluna ainda não existir), nunca tocam em dados. Sem isto,
+# uma base de dados criada antes do plan 01-03 não teria as colunas de
+# walk-forward, e o guard "wf_passed" in df.columns abaixo nunca seria
+# suficiente por si só para garantir que a leitura é possível.
+if os.path.exists(DB_PATH):
+    init_db(DB_PATH)
 
 
 @st.cache_data(ttl=5)
@@ -69,13 +81,21 @@ else:
 # ---------------------------------------------------------------------
 # Resumo
 # ---------------------------------------------------------------------
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Estratégias testadas", len(df))
 c2.metric("Aprovadas", int((df["status"] == "passed").sum()))
 c3.metric("Reprovadas", int((df["status"] == "failed").sum()))
 best_pf = df["profit_factor"].max()
 c4.metric("Melhor profit factor (net-of-cost)", f"{best_pf:.2f}")
 c5.metric("Gerações executadas", int(df["generation"].max()) + 1)
+# VALID-01: contagem de estratégias com revalidação walk-forward CONFIRMADA
+# em dados reais — distinta de wf_passed (que pode ter corrido só em
+# sintético/fallback, ver RESEARCH.md Pitfall 4 e save_walk_forward_result()).
+if "revalidated_on_real_data" in df.columns:
+    n_real = int((df["revalidated_on_real_data"] == 1).sum())
+else:
+    n_real = 0
+c6.metric("Revalidadas (real, WF)", n_real)
 
 st.divider()
 
@@ -178,6 +198,73 @@ stats_cols = {
 }
 stats_df = pd.DataFrame({"Métrica": list(stats_cols.values()), "Valor": [row[k] for k in stats_cols]})
 st.table(stats_df.set_index("Métrica"))
+
+# ---------------------------------------------------------------------
+# Walk-forward (VALID-01) — veredito fold-a-fold + badge real-data
+# ---------------------------------------------------------------------
+st.divider()
+st.markdown("**Walk-forward (out-of-sample):**")
+
+if "wf_passed" not in df.columns:
+    # Guard a nível de DataFrame — degrada graciosamente em vez de rebentar
+    # se esta base de dados for de antes do plan 01-03 (colunas ainda não
+    # existem mesmo depois do init_db() no arranque, ex.: falha de migração).
+    st.warning(
+        "Esta base de dados não tem as colunas de walk-forward "
+        "(`wf_passed`, `wf_fold_results`, `revalidated_on_real_data`) — "
+        "provavelmente foi gerada antes do mecanismo de walk-forward existir."
+    )
+elif pd.isna(row.get("wf_passed")):
+    st.info(
+        "Esta estratégia ainda não foi revalidada via walk-forward. Corre:\n\n"
+        "```\npython src/revalidate_walk_forward.py\n```"
+    )
+else:
+    fold_results = json.loads(row["wf_fold_results"]) if row.get("wf_fold_results") else []
+    is_real = row.get("revalidated_on_real_data") == 1
+
+    if is_real:
+        st.success("Revalidated on real data (walk-forward OOS)")
+    else:
+        st.warning(
+            "Walk-forward ran on synthetic/fallback data only — does NOT count as VALID-01 revalidation"
+        )
+
+    if row["wf_passed"] == 1:
+        st.success("✅ Walk-forward APROVADO — todos os folds passaram o gate relaxado E o agregado passou o gate completo.")
+    else:
+        st.error("❌ Walk-forward REPROVADO — pelo menos um fold ou o agregado falhou o gate.")
+
+    if fold_results:
+        fold_rows = []
+        for f in fold_results:
+            fold_rows.append({
+                "fold": f["fold"],
+                "total_trades": f["stats"]["total_trades"],
+                "total_return_r": f["stats"]["total_return_r"],
+                "passed": f["passed"],
+            })
+        fold_df = pd.DataFrame(fold_rows)
+        fold_df_display = fold_df.rename(columns={
+            "fold": "Fold", "total_trades": "Nº trades",
+            "total_return_r": "Retorno líquido de custos (R)", "passed": "Passou",
+        })
+        fold_df_display["Passou"] = fold_df_display["Passou"].map({True: "✅", False: "❌"})
+        st.dataframe(fold_df_display, use_container_width=True, hide_index=True)
+
+        fold_fig = go.Figure()
+        fold_fig.add_trace(go.Bar(
+            x=fold_df["fold"], y=fold_df["total_return_r"],
+            marker_color=[("#2ca02c" if p else "#d62728") for p in fold_df["passed"]],
+            name="Retorno por fold (R)",
+        ))
+        fold_fig.add_hline(y=0, line_dash="dot", line_color="gray")
+        fold_fig.update_layout(
+            title="Retorno out-of-sample por fold (líquido de custos)",
+            height=350, xaxis_title="Fold", yaxis_title="Retorno (R)",
+            margin=dict(t=40, b=20),
+        )
+        st.plotly_chart(fold_fig, use_container_width=True)
 
 if trades:
     st.markdown("**Histórico de trades:**")
