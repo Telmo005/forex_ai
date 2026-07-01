@@ -158,9 +158,18 @@ def save_walk_forward_result(db_path: str, strategy_id: str, wf_passed: bool,
     inferir isto a partir do valor de wf_passed. O gate de produção futuro
     (Phase 3, hedge_engine.py) deve exigir AMBAS as flags verdadeiras, não
     só wf_passed.
+
+    levanta:
+        ValueError - se `strategy_id` não corresponder a nenhuma linha
+            existente (IN-01, 01-REVIEW.md). Sem este check, um `UPDATE ...
+            WHERE id = ?` que não afeta nenhuma linha (ex.: registry
+            resetado, ou a linha foi apagada entre list_strategies() e esta
+            chamada) devolvia sucesso silencioso — o chamador (
+            revalidate_walk_forward.py) registava "estratégia revalidada"
+            mesmo sem nada ter sido persistido de facto.
     """
     conn = sqlite3.connect(db_path)
-    conn.execute(
+    cur = conn.execute(
         """
         UPDATE strategies
         SET wf_passed = ?, wf_fold_results = ?, revalidated_on_real_data = ?
@@ -174,7 +183,13 @@ def save_walk_forward_result(db_path: str, strategy_id: str, wf_passed: bool,
         ),
     )
     conn.commit()
+    rowcount = cur.rowcount
     conn.close()
+    if rowcount == 0:
+        raise ValueError(
+            f"save_walk_forward_result: nenhuma estratégia com id={strategy_id!r} encontrada "
+            "— nada foi persistido."
+        )
 
 
 def list_strategies(db_path: str, status: str | None = None) -> pd.DataFrame:
