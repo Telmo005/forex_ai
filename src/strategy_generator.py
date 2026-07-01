@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from backtest_engine import run_hedge_backtest, validate_strategy
+from backtest_engine import COST_MODEL_VERSION, resolve_cost_params, run_hedge_backtest, validate_strategy
 from strategy_registry import init_db, save_strategy
 
 # Intervalos válidos para cada parâmetro — usados tanto para geração
@@ -82,7 +82,13 @@ def run_strategy_lab(
         gen_results = []
         for pair_a, pair_b, params, parent_id in candidates:
             sid = uuid.uuid4().hex[:8]
-            result = run_hedge_backtest(price_data[pair_a], price_data[pair_b], params)
+            # Custos de transação são sempre resolvidos e passados — nenhum
+            # candidato do laboratório pode ser testado/aprovado num path
+            # cost-blind (CLAUDE.md regra 4 / VALID-02). Custos são por
+            # símbolo (não um flag de CLI do lab run), ver 01-RESEARCH.md
+            # Pitfall 1.
+            cost_params = resolve_cost_params(pair_a, pair_b)
+            result = run_hedge_backtest(price_data[pair_a], price_data[pair_b], params, cost_params=cost_params)
             stats = result["stats"]
             passed, reasons = validate_strategy(stats)
 
@@ -96,6 +102,7 @@ def run_strategy_lab(
                 "generation": gen,
                 "parent_id": parent_id,
                 "trades": result["trades"],
+                "cost_model_version": COST_MODEL_VERSION,
                 **stats,
             }
             save_strategy(db_path, record)
