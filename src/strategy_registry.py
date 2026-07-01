@@ -63,6 +63,42 @@ def migrate_add_cost_columns(db_path: str) -> None:
     conn.close()
 
 
+def migrate_add_walk_forward_columns(db_path: str) -> None:
+    """Migração aditiva e idempotente: adiciona as colunas de walk-forward
+    (`wf_passed`, `wf_fold_results`, `revalidated_on_real_data`) a uma base
+    de dados já existente (criada antes do plan 01-03). Mesma técnica de
+    `migrate_add_cost_columns` (PRAGMA table_info() + ALTER TABLE condicional,
+    porque sqlite3 não suporta `ADD COLUMN IF NOT EXISTS`) — ver
+    01-RESEARCH.md "Registry Schema Migration". Chamada a partir de
+    init_db() logo a seguir à migração de custos, para que qualquer
+    chamador existente (ex. strategy_generator.py) receba as novas colunas
+    automaticamente.
+
+    `wf_passed` e `revalidated_on_real_data` são armazenados como
+    INTEGER 0/1 (sqlite não tem tipo booleano nativo). `wf_fold_results` é
+    TEXT (JSON), mesma convenção de serialização da coluna `trades`
+    existente.
+
+    CRÍTICO (regra 7 / VALID-01): `revalidated_on_real_data` é uma flag
+    DISTINTA de `wf_passed` — uma estratégia pode passar walk-forward em
+    dados sintéticos (wf_passed=1, revalidated_on_real_data=0); só uma
+    corrida confirmada em dados reais (--mode mt5, plan 01-04) marca
+    revalidated_on_real_data=1. Ver save_walk_forward_result() abaixo.
+    """
+    conn = sqlite3.connect(db_path)
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(strategies)")}
+    new_cols = {
+        "wf_passed": "INTEGER",
+        "wf_fold_results": "TEXT",
+        "revalidated_on_real_data": "INTEGER",
+    }
+    for col, coltype in new_cols.items():
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE strategies ADD COLUMN {col} {coltype}")
+    conn.commit()
+    conn.close()
+
+
 def init_db(db_path: str) -> None:
     parent = os.path.dirname(db_path)
     if parent:
@@ -72,6 +108,7 @@ def init_db(db_path: str) -> None:
     conn.commit()
     conn.close()
     migrate_add_cost_columns(db_path)
+    migrate_add_walk_forward_columns(db_path)
 
 
 def save_strategy(db_path: str, record: dict) -> None:
@@ -93,6 +130,47 @@ def save_strategy(db_path: str, record: dict) -> None:
             record["max_drawdown_r"], record["avg_hold_bars"], record["avg_win_r"],
             record["avg_loss_r"], record["bars_tested"], json.dumps(record["trades"]),
             record["cost_model_version"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_walk_forward_result(db_path: str, strategy_id: str, wf_passed: bool,
+                              wf_fold_results: list[dict],
+                              revalidated_on_real_data: bool) -> None:
+    """Persiste o veredito de walk_forward_validate() [backtest_engine.py,
+    plan 01-03] para uma estratégia JÁ existente na tabela — faz UPDATE, não
+    INSERT, porque a estratégia já foi guardada por save_strategy() quando o
+    laboratório a testou pela primeira vez; esta função só anexa o
+    resultado da revalidação walk-forward a esse registo.
+
+    `wf_passed` e `revalidated_on_real_data` são gravados como INTEGER 0/1
+    (sqlite não tem tipo booleano nativo). `wf_fold_results` é serializado
+    em JSON, mesma convenção da coluna `trades` existente.
+
+    IMPORTANTE (regra 7 / VALID-01): `revalidated_on_real_data` é uma flag
+    DISTINTA de `wf_passed`, nunca derivada dela. Uma estratégia pode passar
+    walk-forward em dados SINTÉTICOS (wf_passed=True) sem que isso
+    signifique revalidação em dados reais — só chamar este helper com
+    `revalidated_on_real_data=True` depois de uma corrida confirmada contra
+    dados reais (`data_pipeline.py --mode mt5`, não `--mode synth`), nunca
+    inferir isto a partir do valor de wf_passed. O gate de produção futuro
+    (Phase 3, hedge_engine.py) deve exigir AMBAS as flags verdadeiras, não
+    só wf_passed.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        UPDATE strategies
+        SET wf_passed = ?, wf_fold_results = ?, revalidated_on_real_data = ?
+        WHERE id = ?
+        """,
+        (
+            int(bool(wf_passed)),
+            json.dumps(wf_fold_results),
+            int(bool(revalidated_on_real_data)),
+            strategy_id,
         ),
     )
     conn.commit()

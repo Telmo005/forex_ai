@@ -113,6 +113,80 @@ distinguível de uma revalidada com custos reais.
 (cada perna paga o seu próprio spread/slippage/comissão) e devolve um único
 dict pronto a passar para `run_hedge_backtest()`.
 
+## Metodologia walk-forward (CLAUDE.md regra 2 e regra 3 — gatilho exato)
+
+`src/backtest_engine.py` expõe `walk_forward_validate(price_a, price_b, params,
+cost_params=None, config=None)` (plan 01-03 desta fase, VALID-01). É
+**revalidação de parâmetros já fixos/aprovados**, nunca reotimização — os
+`params` chegam do laboratório (ou de uma estratégia já ✅ Aprovada no
+dashboard) e `walk_forward_validate()` nunca os refita nem muta por fold; o
+loop de mutação de `strategy_generator.py` está fora de âmbito aqui.
+
+**Tipo de janela: ROLLING, não ancorada/expansível.** `TimeSeriesSplit` do
+scikit-learn tem por padrão uma janela de treino que só cresce (ancorada).
+Isso não corresponde à tese deste projeto (regime de mercado dependente do
+tempo, scalping M5) — dados de treino demasiado antigos deixam de ser
+representativos do regime atual. `walk_forward_validate()` força
+`max_train_size` para obter janelas de treino de tamanho FIXO que deslizam no
+tempo (rolling), nunca ancoradas.
+
+**Parâmetros fixos exatos** (`backtest_engine.WALK_FORWARD_CONFIG`):
+
+| Parâmetro | Valor | Significado |
+|---|---|---|
+| `n_splits` | 5 | Nº de folds sequenciais out-of-sample |
+| `max_train_size` | 5000 barras | Tamanho FIXO da janela de treino — garante rolling, não ancorado |
+| `gap` | 0 | Sem gap treino/teste: os parâmetros já estão fixos, não há refit que possa vazar informação através da fronteira treino/teste |
+| `window_type` | `"rolling"` | Documentado explicitamente para não mascarar como ancorado |
+
+**Gate por fold (RELAXADO)** (`backtest_engine.FOLD_THRESHOLDS`): cada fold
+individual só precisa de (a) retorno líquido de custos positivo
+(`total_return_r > 0`) e (b) nº de trades >= `min_trades_per_fold` (= **6**).
+Este valor é DISTINTO do `DEFAULT_THRESHOLDS["min_trades"]` (=20) agregado —
+não é o agregado dividido pelo nº de folds. Um fold com 5000 barras de
+treino ainda precisa de produzir uma amostra de trades minimamente
+defensável por si só (6 é o ponto médio conservador da gama 5-8 recomendada
+para não deixar passar folds de 2-3 trades — ruído, não edge — só porque o
+total agregado cumpre o limiar). O gate relaxado é expresso reusando
+`validate_strategy()` com um `thresholds` dict próprio (sem herdar
+`min_profit_factor`/`min_sharpe`/`max_drawdown_r` do agregado) — existe um
+único caminho de validação no código, não dois divergentes.
+
+**Gate agregado (COMPLETO):** os trades out-of-sample de TODOS os folds são
+concatenados, `compute_stats()` roda sobre essa amostra agregada, e
+`validate_strategy()` aplica o `DEFAULT_THRESHOLDS` inteiro (profit factor
+>= 1.2, Sharpe >= 0.15, drawdown <= 8.0R, min_trades >= 20) — os mesmos
+critérios de aprovação inicial da estratégia, agora sobre dados
+out-of-sample.
+
+`overall_passed` só é `True` se TODOS os folds passarem o gate relaxado E o
+agregado passar o `DEFAULT_THRESHOLDS` completo.
+
+**Custos sempre presentes.** Cada fold chama o mesmo `run_hedge_backtest()`
+cost-aware (plan 01-02) — `cost_params` é repassado tal-e-qual a cada fold,
+nunca só ao primeiro ou só ao agregado, para que VALID-01 (walk-forward) e
+VALID-02 (custos) nunca se percam um do outro: um veredito walk-forward é
+sempre net-of-cost em todos os folds.
+
+**`revalidated_on_real_data` é distinto de `wf_passed`** (CLAUDE.md regra 7).
+`walk_forward_validate()` em si é agnóstico à origem dos dados — corre da
+mesma forma sobre `price_a`/`price_b` sintéticos ou reais. `wf_passed`
+(persistido via `strategy_registry.save_walk_forward_result()`) regista só
+se o veredito passou, sem indicar a origem dos dados. `revalidated_on_real_data`
+só deve ser marcado `True` depois de uma corrida CONFIRMADA contra dados
+reais da corretora (`data_pipeline.py --mode mt5`, nunca `--mode synth`) —
+nunca inferido a partir de `wf_passed`. Uma estratégia pode ter
+`wf_passed=True` e `revalidated_on_real_data=False` (passou walk-forward só
+em sintético) — o futuro gate de produção (camada 3, `hedge_engine.py`) deve
+exigir AMBAS as flags verdadeiras antes de aceitar os parâmetros.
+
+**Nota sobre a escolha rolling vs. ancorada.** Esta decisão foi adotada de
+uma assunção de pesquisa (RESEARCH.md Assumption A2) e não foi reconfirmada
+explicitamente numa etapa `discuss-phase` com o utilizador. Se esta
+assunção estiver errada para este projeto, `WALK_FORWARD_CONFIG["max_train_size"]
+= None` restaura o comportamento ancorado/expansível default do
+scikit-learn (e `window_type` deve ser atualizado para refletir isso).
+
 ## Como correr
 
 ```bash
@@ -139,11 +213,14 @@ validação no histórico real.
   de otimização mais sofisticada (ex.: optimização bayesiana). Suficiente
   para começar, vale revisitar se a procura demorar demasiado a encontrar
   estratégias válidas.
-- Não há ainda separação explícita treino/validação dentro do próprio
-  backtest (o backtest todo é "in-sample" relativo ao período fornecido).
-  Antes de qualquer execução real, correr o mesmo conjunto de parâmetros
-  aprovados num período de dados COMPLETAMENTE separado (out-of-sample)
-  que não foi usado durante a geração/seleção.
+- ~~Não há ainda separação explícita treino/validação dentro do próprio
+  backtest~~ — **RESOLVIDO no plan 01-03 desta fase (mecanismo de
+  VALID-01).** `backtest_engine.walk_forward_validate()` revalida
+  parâmetros já fixos/aprovados em folds sequenciais rolling out-of-sample
+  (ver secção "Metodologia walk-forward" acima). O gap que resta é a
+  EXECUÇÃO desta revalidação contra dados reais de uma estratégia já
+  aprovada e a marcação de `revalidated_on_real_data=True` — isso é o
+  plan 01-04 desta fase, ainda não corrido.
 - ~~O backtest não modela custos de transação~~ — **RESOLVIDO no plan
   01-02 desta fase (VALID-02).** `run_hedge_backtest()` subtrai spread,
   slippage e comissão de `pnl_r` no momento em que cada trade fecha (ver
