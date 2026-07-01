@@ -69,19 +69,22 @@ coverage:
   - id: D4
     description: "RiskGuardTests.mq5 compiles with zero errors/warnings in MetaEditor (F7) and, when run as a Script, PrintSummary reports all D-14 adversarial assertions passing (0 failed) in the Experts/Journal log"
     requirement: "RISK-08"
-    verification: []
+    verification:
+      - kind: manual
+        ref: "User ran RiskGuardTests on EURUSD,M1 chart. Journal output: 'Resumo da suite: RiskGuardTests — Total: 19  Passou: 19  Falhou: 0 — TODOS OS TESTES PASSARAM.'"
+        status: pass
     human_judgment: true
-    rationale: "MetaEditor/MT5 is a Windows GUI application that cannot be launched, compiled, or observed from this shell session. Compilation and Script execution require a human to open MetaEditor, run F7, drag the Script onto a chart, and read the Journal output. This is Task 4's blocking checkpoint and has NOT been performed yet."
+    rationale: "MetaEditor/MT5 is a Windows GUI application that cannot be launched, compiled, or observed from an automated shell session. User compiled (F7, clean) and ran the Script (double-click/drag onto EURUSD,M1 chart per Navigator > Scripts), and reported the exact Journal output: 19/19 assertions passed, 0 failed."
 
 # Metrics
 duration: unknown (interrupted mid-plan; Tasks 1-3 completed before a connection error, resumed in a follow-up session for verification + documentation only)
 completed: 2026-07-02
-status: partial
+status: complete
 ---
 
 # Phase 2 Plan 3: MQL5 RiskGuard + Standalone Test Harness Summary
 
-**mql5/RiskGuard.mqh pure risk-check functions (drawdown/exposure/position-count/kill-switch/mandatory-SL) plus a standalone RiskGuardTests.mq5 Script harness — code complete and structurally verified, but the MetaEditor compile-and-run checkpoint (Task 4) is still pending human action.**
+**mql5/RiskGuard.mqh pure risk-check functions (drawdown/exposure/position-count/kill-switch/mandatory-SL) plus a standalone RiskGuardTests.mq5 Script harness — code complete, structurally verified, and confirmed passing 19/19 adversarial assertions in a real MetaEditor/MT5 compile-and-run by the user.**
 
 ## Performance
 
@@ -108,7 +111,7 @@ Each task was committed atomically by the prior (interrupted) session:
 1. **Task 1: Create mql5/RiskGuard.mqh pure risk-check functions** - `e44f2aa` (feat)
 2. **Task 2: Create mql5/Tests/TestLite.mqh minimal assertion helper** - `962b45f` (feat)
 3. **Task 3: Create mql5/Tests/RiskGuardTests.mq5 standalone Script runner** - `c949b0e` (feat)
-4. **Task 4: MetaEditor compile-and-run checkpoint** - NOT YET PERFORMED (blocking `checkpoint:human-verify` gate; requires human action in a Windows GUI app not reachable from this shell)
+4. **Task 4: MetaEditor compile-and-run checkpoint** - PERFORMED by user: compiled clean (F7), ran on EURUSD,M1 chart, Journal reported 19/19 assertions passed, 0 failed (no code commit — verification-only step)
 
 **Plan metadata:** (this commit) - docs: partial plan summary, checkpoint pending
 
@@ -139,24 +142,25 @@ No code-level issues found. The working tree was clean (no uncommitted changes) 
 
 ## User Setup Required
 
-**Task 4 is a blocking `checkpoint:human-verify` gate that requires manual action in MetaEditor — this CANNOT be performed from an automated shell session (no Windows GUI access).**
+None further — Task 4 is complete. For the record (and relevant to Phase 4, which will also `#include` `RiskGuard.mqh` from `ScalpingEA.mq5`):
 
-Steps the user must perform:
-1. Open MetaEditor (from the MT5 terminal: Tools -> MetaQuotes Language Editor).
-2. Copy `mql5/RiskGuard.mqh` into the terminal's `MQL5/Include` folder (or open the project folder directly in MetaEditor) so the `#include` resolves.
-3. Copy `mql5/Tests/TestLite.mqh` next to `RiskGuardTests.mq5` and open `mql5/Tests/RiskGuardTests.mq5`.
-4. Compile with F7 — expect zero errors and zero warnings.
-5. Run the Script: drag `RiskGuardTests` onto any open chart, or use MetaEditor's Run action. No account login, no Strategy Tester, no historical data required.
-6. Read the Experts/Journal log: `PrintSummary()` must report all assertions passed (0 failed). Every adversarial case (drawdown breaches, oversized-lot clamp, exposure breaches, 4th-pair rejection, missing-SL rejection) must show as passing.
+**Correction discovered during this checkpoint:** the original setup note (below, as first given) was wrong about where `RiskGuard.mqh` needs to live. The includes in `RiskGuardTests.mq5` are quoted (`#include "..\RiskGuard.mqh"`, `#include "TestLite.mqh"`), which resolve **relative to the including file's own location**, not the terminal's `MQL5/Include` folder. Putting `RiskGuard.mqh` into `MQL5/Include` (the original instruction) does NOT satisfy `"..\RiskGuard.mqh"`.
 
-**Resume signal:** Type "approved" if it compiles clean and all assertions pass, or paste the compiler errors / failed-assertion log so the discrepancy can be fixed.
+**What actually works:** copy the project's `mql5/` folder as a whole, preserving its internal structure, into the terminal's `MQL5/Experts/` folder, e.g.:
+```
+<Terminal Data Folder>/MQL5/Experts/mql5/RiskGuard.mqh
+<Terminal Data Folder>/MQL5/Experts/mql5/Tests/TestLite.mqh
+<Terminal Data Folder>/MQL5/Experts/mql5/Tests/RiskGuardTests.mq5
+```
+Then compile/run `RiskGuardTests.mq5` from inside that `Tests/` folder — the relative `..\` and same-folder includes then resolve correctly. This is the pattern Phase 4 should reuse for `ScalpingEA.mq5`'s own `#include "RiskGuard.mqh"`.
+
+To run a compiled Script (for future reference): Navigator panel (Ctrl+N) → **Scripts** folder (not Experts) → double-click the script name, or drag it onto any open chart (a chart must be open; the script doesn't need live/historical data, just a chart context to attach to).
 
 ## Next Phase Readiness
 
-- Code for Tasks 1-3 is complete, committed, and structurally verified via grep against every acceptance criterion in `02-03-PLAN.md`.
-- **This plan is NOT fully done.** Task 4 (blocking checkpoint) must be completed by the user in MetaEditor before Phase 2 as a whole can be considered closed, since `02-03-PLAN.md`'s own `<verification>` block requires the manual compile-and-run step as proof of RISK-07/RISK-08 (MQL5-side).
-- Once Task 4 is confirmed (or fixes are applied in response to a failed-assertion log), this SUMMARY's frontmatter `status` should be updated from `partial` to `complete` and coverage item D4's `verification`/`status` populated with the actual Journal outcome.
-- `mql5/RiskGuard.mqh` is ready to be consumed by the future `ScalpingEA.mq5` (Phase 4) once Task 4 confirms it compiles and behaves correctly in a real MetaEditor environment.
+- All 4 tasks complete. Code for Tasks 1-3 is committed and structurally verified via grep against every acceptance criterion in `02-03-PLAN.md`. Task 4's manual compile-and-run checkpoint is confirmed: MetaEditor compiled `RiskGuardTests.mq5` with zero errors, and running it on an EURUSD,M1 chart produced Journal output `Total: 19  Passou: 19  Falhou: 0 — TODOS OS TESTES PASSARAM.`
+- **Phase 2's RISK-07/RISK-08 MQL5-side requirements are now genuinely proven**, not just claimed — the redundant, independent MQL5 risk checks compile and correctly reject every D-14 adversarial case in a real MetaEditor environment.
+- `mql5/RiskGuard.mqh` is ready to be consumed by the future `ScalpingEA.mq5` (Phase 4) — reuse the folder-structure lesson above when wiring its `#include`.
 
 ---
 *Phase: 02-deterministic-risk-engine*
