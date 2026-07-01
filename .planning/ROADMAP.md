@@ -13,7 +13,7 @@ This milestone takes the existing research stack — a data pipeline and strateg
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Walk-Forward & Cost-Aware Validation** - The strategy lab validates candidates with realistic transaction costs and genuine out-of-sample walk-forward windows before anything downstream consumes its output.
+- [x] **Phase 1: Walk-Forward & Cost-Aware Validation** - The strategy lab validates candidates with realistic transaction costs and genuine out-of-sample walk-forward windows before anything downstream consumes its output. (completed 2026-07-01)
 - [ ] **Phase 2: Deterministic Risk Engine** - A Python + MQL5 risk engine enforces stop-loss, position sizing, exposure, drawdown, and kill-switch rules independently of any ML inference, proven against adversarial synthetic orders.
 - [ ] **Phase 3: Production Hedge Engine** - The hedge engine proposes pairs-trade orders using only dashboard-approved parameters, continuously re-validating cointegration, and never executes orders itself.
 - [ ] **Phase 4: MQL5 Expert Advisor & Alerting** - The EA executes risk-checked orders on a hedging-mode MT5 account, degrades safely on connection loss, and the system alerts the user when risk or connectivity thresholds are breached.
@@ -31,12 +31,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Every backtest run — manual or automated — reports performance net of modeled spread, slippage, and commission; no metric in the dashboard is cost-blind.
   3. The walk-forward methodology (window type, length, train/test gap, minimum trades per fold) is fixed and documented, and is applied identically to every candidate.
 
-**Plans**: 3/4 plans executed
+**Plans**: 4/4 plans complete
 
 - [x] 01-01-PLAN.md
 - [x] 01-02-PLAN.md
 - [x] 01-03-PLAN.md
-- [ ] 01-04-PLAN.md
+- [x] 01-04-PLAN.md
 
 ### Phase 2: Deterministic Risk Engine
 
@@ -88,7 +88,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Walk-Forward & Cost-Aware Validation | 3/4 | In Progress|  |
+| 1. Walk-Forward & Cost-Aware Validation | 4/4 | Complete   | 2026-07-01 |
 | 2. Deterministic Risk Engine | 0/TBD | Not started | - |
 | 3. Production Hedge Engine | 0/TBD | Not started | - |
 | 4. MQL5 Expert Advisor & Alerting | 0/TBD | Not started | - |
