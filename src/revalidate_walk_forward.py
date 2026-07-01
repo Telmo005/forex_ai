@@ -41,18 +41,30 @@ import sys
 
 import pandas as pd
 
-# Força stdout/stderr para UTF-8: o console do Windows (cp1252 por default)
-# não consegue codificar acentos portugueses nem emojis usados nas mensagens
-# deste script (ex.: "✅", "não"), e argparse.print_help()/logging escrevem
-# diretamente para esses streams. Sem isto, `--help` e o logging normal
-# podem lançar UnicodeEncodeError em vez de simplesmente imprimir texto —
-# já observado como problema cosmético noutros scripts desta fase (ver
-# 01-02-SUMMARY.md "Issues Encountered"), mas aqui precisa de correção
-# real porque o --help tem de sair com código 0 (critério de aceitação).
-if sys.stdout.encoding is None or sys.stdout.encoding.lower() != "utf-8":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-if sys.stderr.encoding is None or sys.stderr.encoding.lower() != "utf-8":
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+def _ensure_utf8_console() -> None:
+    """Força stdout/stderr para UTF-8: o console do Windows (cp1252 por
+    default) não consegue codificar acentos portugueses nem emojis usados
+    nas mensagens deste script (ex.: "✅", "não"), e
+    argparse.print_help()/logging escrevem diretamente para esses streams.
+    Sem isto, `--help` e o logging normal podem lançar UnicodeEncodeError em
+    vez de simplesmente imprimir texto — já observado como problema
+    cosmético noutros scripts desta fase (ver 01-02-SUMMARY.md "Issues
+    Encountered"), mas aqui precisa de correção real porque o --help tem de
+    sair com código 0 (critério de aceitação).
+
+    WR-02 (01-REVIEW.md): isto corria incondicionalmente à importação do
+    módulo e assumia que sys.stdout/sys.stderr sempre expõem `.buffer` —
+    falso para streams já substituídos por outra ferramenta (ex. captura de
+    stdout do pytest nalgumas configurações), o que levantava AttributeError
+    só por importar este módulo, mesmo sem correr main(). Agora só se chama
+    explicitamente a partir de `if __name__ == "__main__"` (nunca à
+    importação) e verifica `hasattr(stream, "buffer")` antes de envolver.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        enc = getattr(stream, "encoding", None)
+        if (enc is None or enc.lower() != "utf-8") and hasattr(stream, "buffer"):
+            setattr(sys, name, io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace"))
 
 from backtest_engine import resolve_cost_params, walk_forward_validate
 from strategy_registry import list_strategies, save_walk_forward_result
@@ -106,35 +118,48 @@ def revalidate_approved_strategies(
         strategy_id = row["id"]
         pair_a = row["pair_a"]
         pair_b = row["pair_b"]
-        params = json.loads(row["params"])
-        cost_params = resolve_cost_params(pair_a, pair_b)
+        try:
+            # WR-01 (01-REVIEW.md): qualquer falha aqui (parquet em falta,
+            # params JSON corrompido, reference_lot_size divergente em
+            # resolve_cost_params, etc.) não pode abortar o batch inteiro —
+            # regista-se o erro, salta-se esta estratégia, e continua-se
+            # com as restantes, para que um único registo mal-formado não
+            # apague o progresso de revalidação já feito nesta corrida.
+            params = json.loads(row["params"])
+            cost_params = resolve_cost_params(pair_a, pair_b)
 
-        price_a = load_price(pair_a)
-        price_b = load_price(pair_b)
+            price_a = load_price(pair_a)
+            price_b = load_price(pair_b)
 
-        wf_result = walk_forward_validate(price_a, price_b, params, cost_params=cost_params)
+            wf_result = walk_forward_validate(price_a, price_b, params, cost_params=cost_params)
 
-        save_walk_forward_result(
-            db_path,
-            strategy_id,
-            wf_passed=wf_result["overall_passed"],
-            wf_fold_results=wf_result["fold_results"],
-            revalidated_on_real_data=real_data,
-        )
+            save_walk_forward_result(
+                db_path,
+                strategy_id,
+                wf_passed=wf_result["overall_passed"],
+                wf_fold_results=wf_result["fold_results"],
+                revalidated_on_real_data=real_data,
+            )
 
-        log.info(
-            "Estratégia %s (%s/%s): wf_passed=%s, revalidated_on_real_data=%s",
-            strategy_id, pair_a, pair_b, wf_result["overall_passed"], real_data,
-        )
+            log.info(
+                "Estratégia %s (%s/%s): wf_passed=%s, revalidated_on_real_data=%s",
+                strategy_id, pair_a, pair_b, wf_result["overall_passed"], real_data,
+            )
 
-        results.append({
-            "strategy_id": strategy_id,
-            "pair_a": pair_a,
-            "pair_b": pair_b,
-            "wf_passed": wf_result["overall_passed"],
-            "revalidated_on_real_data": real_data,
-            "fold_results": wf_result["fold_results"],
-        })
+            results.append({
+                "strategy_id": strategy_id,
+                "pair_a": pair_a,
+                "pair_b": pair_b,
+                "wf_passed": wf_result["overall_passed"],
+                "revalidated_on_real_data": real_data,
+                "fold_results": wf_result["fold_results"],
+            })
+        except Exception:
+            log.exception(
+                "Falha a revalidar estratégia %s (%s/%s) — a saltar, restantes continuam.",
+                strategy_id, pair_a, pair_b,
+            )
+            continue
 
     return results
 
@@ -179,4 +204,5 @@ def main():
 
 
 if __name__ == "__main__":
+    _ensure_utf8_console()
     main()
