@@ -51,7 +51,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The EA independently re-verifies every risk limit before placing an order rather than trusting values received from Python, and this redundancy is demonstrated under a synthetic adversarial test suite (excessive lots, duplicate orders, invalid symbols).
   5. Static inspection confirms `risk_engine.py` and `RiskGuard.mqh` contain no import of, or branch on, output from `ml_model.py` or any ML inference path.
 
-**Plans**: TBD
+**Plans**: 1/3 plans executed
+
+- [x] 02-01-PLAN.md
+- [ ] 02-02-PLAN.md
+- [ ] 02-03-PLAN.md
 
 ### Phase 3: Production Hedge Engine
 
@@ -89,6 +93,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Walk-Forward & Cost-Aware Validation | 4/4 | Complete   | 2026-07-01 |
-| 2. Deterministic Risk Engine | 0/TBD | Not started | - |
+| 2. Deterministic Risk Engine | 1/3 | In Progress|  |
 | 3. Production Hedge Engine | 0/TBD | Not started | - |
 | 4. MQL5 Expert Advisor & Alerting | 0/TBD | Not started | - |
