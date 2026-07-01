@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import TimeSeriesSplit
 
 
 # --------------------------------------------------------------------------
@@ -416,3 +417,160 @@ def validate_strategy(stats: dict, thresholds: dict | None = None) -> tuple[bool
         reasons.append("retorno total não positivo no período testado")
 
     return (len(reasons) == 0), reasons
+
+
+# --------------------------------------------------------------------------
+# Walk-forward: revalidação out-of-sample de parâmetros já fixos/aprovados
+# --------------------------------------------------------------------------
+#
+# Isto é REVALIDAÇÃO, não reotimização (RESEARCH.md Assumption A3 / secção
+# Anti-Patterns): os `params` chegam já fixos (escolhidos pelo laboratório e
+# aprovados no dashboard, ou em teste); walk_forward_validate() NUNCA refita
+# ou muta `params` por fold — o loop de mutação de strategy_generator.py
+# está fora de âmbito aqui. Cada fold reusa o mesmo run_hedge_backtest()
+# (já cost-aware desde o plan 01-02) para que o veredito out-of-sample seja
+# sempre net-of-cost, sem wiring adicional.
+#
+# Janela ROLLING (não expandida/ancorada): TimeSeriesSplit tem por padrão
+# uma janela de treino EXPANSÍVEL (anchored), o que não corresponde à tese
+# deste projeto de regime de mercado dependente do tempo + scalping M5
+# (RESEARCH.md Pitfall 3 / Assumption A2). `max_train_size` força janelas de
+# treino ROLLING (tamanho fixo, desliza no tempo) em vez de ancoradas.
+#
+# NOTA (visível para revisão humana, ver 01-03-PLAN.md <objective>): a
+# escolha rolling-vs-ancorada foi adotada da Assumption A2 do RESEARCH.md e
+# NÃO foi reconfirmada explicitamente numa etapa discuss-phase — se esta
+# assunção estiver errada para este projeto, `WALK_FORWARD_CONFIG["window_type"]`
+# e `max_train_size` são o único ponto a alterar para passar a ancorado
+# (max_train_size=None restaura o comportamento expansível default do
+# sklearn).
+
+WALK_FORWARD_CONFIG = {
+    "n_splits": 5,            # nº de folds sequenciais out-of-sample
+    "max_train_size": 5000,   # tamanho FIXO da janela de treino (barras) -> rolling, não ancorado
+    "gap": 0,                 # sem gap treino/teste: params já fixos, não há refit que possa vazar informação através da fronteira (RESEARCH.md Standard Stack, nota sobre `gap`)
+    "window_type": "rolling",  # documentado explicitamente para não masquerade como ancorado (Pitfall 3 / T-01-07)
+}
+
+FOLD_THRESHOLDS = {
+    # Distinto do DEFAULT_THRESHOLDS["min_trades"] (=20) agregado — NÃO é
+    # min_trades dividido pelo nº de folds (RESEARCH.md Assumption A4).
+    # Um fold com 5000 barras de treino via WALK_FORWARD_CONFIG ainda deve
+    # produzir uma amostra de trades mínima e estatisticamente defensável
+    # por si só; 5-8 é a gama conservadora recomendada em RESEARCH.md
+    # Pitfall 5 para não deixar passar folds de 2-3 trades (ruído, não
+    # edge) só porque o agregado cumpre o limiar total. Escolhido 6 como
+    # ponto médio conservador dessa gama.
+    "min_trades_per_fold": 6,
+}
+
+
+def walk_forward_validate(price_a: pd.Series, price_b: pd.Series, params: dict,
+                           cost_params: dict | None = None,
+                           config: dict | None = None) -> dict:
+    """Revalida `params` (já fixos/aprovados) em folds sequenciais rolling
+    out-of-sample, usando o mesmo run_hedge_backtest() cost-aware do resto
+    deste módulo (VALID-01 + VALID-02 combinados: nenhum fold é cost-blind).
+
+    NÃO refita nem muta `params` entre folds — isto é revalidação, não
+    reotimização (ver comentário de secção acima e RESEARCH.md Anti-Patterns).
+
+    params esperados: os mesmos de run_hedge_backtest() (entry_threshold,
+        exit_threshold, min_correlation, max_hold_bars, beta_window,
+        corr_window, recalc_every opcional).
+
+    cost_params (opcional, dict | None): repassado tal-e-qual a cada
+        run_hedge_backtest() por fold — ver docstring de run_hedge_backtest.
+        Passar sempre um dict populado (via resolve_cost_params) em
+        qualquer chamada usada para aprovação/produção (CLAUDE.md regra 4).
+
+    config (opcional, dict | None): sobrepõe WALK_FORWARD_CONFIG
+        (n_splits, max_train_size, gap, window_type). Default None usa
+        WALK_FORWARD_CONFIG tal como está.
+
+    Gate por fold (RELAXADO): cada fold só precisa de retorno líquido de
+    custos positivo (`total_return_r > 0`) e nº de trades >=
+    FOLD_THRESHOLDS["min_trades_per_fold"] — expresso reusando
+    validate_strategy() com um thresholds dict relaxado, para que exista
+    UM único caminho de validação (RESEARCH.md "Don't Hand-Roll"), não dois
+    divergentes.
+
+    Gate agregado (COMPLETO): os trades out-of-sample de todos os folds são
+    concatenados, compute_stats() roda sobre essa amostra agregada, e
+    validate_strategy() aplica o DEFAULT_THRESHOLDS inteiro (profit factor,
+    Sharpe, drawdown, min_trades) — não só o gate relaxado.
+
+    overall_passed = True apenas se TODOS os folds passarem o gate relaxado
+    E o agregado passar o DEFAULT_THRESHOLDS completo.
+
+    devolve:
+        {
+            "fold_results": [
+                {"fold": int, "stats": dict, "passed": bool, "reasons": list[str]},
+                ...
+            ],
+            "aggregate_stats": dict,       # compute_stats() sobre trades concatenados
+            "aggregate_passed": bool,      # validate_strategy(aggregate_stats, DEFAULT_THRESHOLDS)
+            "aggregate_reasons": list[str],
+            "overall_passed": bool,        # all(fold passed) AND aggregate_passed
+            "window_type": "rolling",
+        }
+    """
+    cfg = {**WALK_FORWARD_CONFIG, **(config or {})}
+
+    n_common = min(len(price_a), len(price_b))
+    price_a = price_a.iloc[-n_common:].reset_index(drop=True)
+    price_b = price_b.iloc[-n_common:].reset_index(drop=True)
+
+    tscv = TimeSeriesSplit(
+        n_splits=cfg["n_splits"],
+        max_train_size=cfg["max_train_size"],
+        gap=cfg["gap"],
+    )
+
+    fold_thresholds = {
+        # Gate relaxado: só retorno positivo + min_trades_per_fold — NÃO
+        # herda min_profit_factor/min_sharpe/max_drawdown_r do
+        # DEFAULT_THRESHOLDS (esses só se aplicam ao agregado, abaixo).
+        "min_trades": FOLD_THRESHOLDS["min_trades_per_fold"],
+        "min_profit_factor": 0.0,
+        "min_sharpe": -np.inf,
+        "max_drawdown_r": np.inf,
+    }
+
+    fold_results = []
+    all_oos_trades: list[dict] = []
+
+    for fold_i, (train_idx, test_idx) in enumerate(tscv.split(range(n_common))):
+        # A janela de treino não é usada para refit (params já fixos) — só
+        # existe porque TimeSeriesSplit exige um par (train_idx, test_idx);
+        # espelha o workflow real onde beta/z-score são recalculados de
+        # forma causal até ao início do teste, mas nenhum parâmetro muda.
+        test_a = price_a.iloc[test_idx[0]:test_idx[-1] + 1]
+        test_b = price_b.iloc[test_idx[0]:test_idx[-1] + 1]
+
+        result = run_hedge_backtest(test_a, test_b, params, cost_params=cost_params)
+        stats = result["stats"]
+        passed, reasons = validate_strategy(stats, fold_thresholds)
+
+        fold_results.append({
+            "fold": fold_i,
+            "stats": stats,
+            "passed": passed,
+            "reasons": reasons,
+        })
+        all_oos_trades.extend(result["trades"])
+
+    aggregate_stats = compute_stats(all_oos_trades, n_common)
+    aggregate_passed, aggregate_reasons = validate_strategy(aggregate_stats, DEFAULT_THRESHOLDS)
+
+    overall_passed = all(f["passed"] for f in fold_results) and aggregate_passed
+
+    return {
+        "fold_results": fold_results,
+        "aggregate_stats": aggregate_stats,
+        "aggregate_passed": aggregate_passed,
+        "aggregate_reasons": aggregate_reasons,
+        "overall_passed": overall_passed,
+        "window_type": cfg["window_type"],
+    }
