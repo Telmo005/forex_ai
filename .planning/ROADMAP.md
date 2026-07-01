@@ -31,10 +31,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Every backtest run — manual or automated — reports performance net of modeled spread, slippage, and commission; no metric in the dashboard is cost-blind.
   3. The walk-forward methodology (window type, length, train/test gap, minimum trades per fold) is fixed and documented, and is applied identically to every candidate.
 
-**Plans**: 1/4 plans executed
+**Plans**: 2/4 plans executed
 
 - [x] 01-01-PLAN.md
-- [ ] 01-02-PLAN.md
+- [x] 01-02-PLAN.md
 - [ ] 01-03-PLAN.md
 - [ ] 01-04-PLAN.md
 
@@ -88,7 +88,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Walk-Forward & Cost-Aware Validation | 1/4 | In Progress|  |
+| 1. Walk-Forward & Cost-Aware Validation | 2/4 | In Progress|  |
 | 2. Deterministic Risk Engine | 0/TBD | Not started | - |
 | 3. Production Hedge Engine | 0/TBD | Not started | - |
 | 4. MQL5 Expert Advisor & Alerting | 0/TBD | Not started | - |
