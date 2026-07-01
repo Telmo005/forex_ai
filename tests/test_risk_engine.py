@@ -352,6 +352,63 @@ def test_aggregate_correlation_adjusted_exposure_above_fifteen_percent_rejected(
 
 
 # ---------------------------------------------------------------------
+# D-14 (10b): correlação correlacionada na perna `pair_b` (não `pair_a`)
+# tem de ser detetada — regressão do finding de 02-REVIEW.md sobre
+# `aggregate_exposure_pct` só comparar pair_a-vs-pair_a e nunca olhar
+# para pair_b nem para a ordem de chave invertida (b, a).
+# ---------------------------------------------------------------------
+
+def test_aggregate_exposure_detects_correlation_hidden_in_pair_b_leg():
+    # Mesmos números que o teste anterior (0.08 bruto * 1.9 = 0.152 > 15%),
+    # mas desta vez o símbolo correlacionado ("AUDUSD") está na perna
+    # `pair_b` da segunda posição, não em `pair_a`. Sob o código antigo
+    # (que só comparava a["pair_a"] contra b["pair_a"]), isto teria sido
+    # silenciosamente tratado como correlação 0.0 e a ordem teria sido
+    # aprovada — exatamente o gap que este teste prova estar corrigido.
+    open_positions = [
+        {"pair_a": "EURUSD", "pair_b": "GBPUSD", "exposure_pct": 0.04},
+        {"pair_a": "NZDUSD", "pair_b": "AUDUSD", "exposure_pct": 0.04},
+    ]
+    state = _healthy_account_state(open_positions=open_positions)
+    high_corr_matrix = {
+        ("EURUSD", "AUDUSD"): 0.9,
+    }
+    ok, reason = check_exposure_limits(state, high_corr_matrix, DEFAULT_LIMITS,
+                                        new_position_exposure_pct=0.0)
+    assert ok is False
+    assert reason == "max_aggregate_exposure"
+
+    decision = _evaluate(_valid_proposal(), state, kill_switch_path="unused_no_such_file.flag",
+                          correlation_matrix=high_corr_matrix, new_position_exposure_pct=0.0)
+    assert decision.approved is False
+    assert decision.reject_reason == "max_aggregate_exposure"
+
+
+# ---------------------------------------------------------------------
+# D-14 (10c): correlação só populada na ordem de chave invertida (b, a)
+# na matriz — tem de ser encontrada pelo lookup bidirecional, não só
+# pela ordem (a, b) que o chamador "esperaria".
+# ---------------------------------------------------------------------
+
+def test_aggregate_exposure_detects_correlation_with_reversed_matrix_key_order():
+    open_positions = [
+        {"pair_a": "EURUSD", "pair_b": "GBPUSD", "exposure_pct": 0.04},
+        {"pair_a": "AUDUSD", "pair_b": "NZDUSD", "exposure_pct": 0.04},
+    ]
+    state = _healthy_account_state(open_positions=open_positions)
+    # Chave invertida face ao teste original: (AUDUSD, EURUSD) em vez de
+    # (EURUSD, AUDUSD) — simula uma matriz de correlação vinda de
+    # data_pipeline.py que não garante uma ordem de chave canónica.
+    reversed_key_corr_matrix = {
+        ("AUDUSD", "EURUSD"): 0.9,
+    }
+    ok, reason = check_exposure_limits(state, reversed_key_corr_matrix, DEFAULT_LIMITS,
+                                        new_position_exposure_pct=0.0)
+    assert ok is False
+    assert reason == "max_aggregate_exposure"
+
+
+# ---------------------------------------------------------------------
 # D-14 (11): 4º par concorrente — rejeitado (máximo 3 por D-08)
 # ---------------------------------------------------------------------
 

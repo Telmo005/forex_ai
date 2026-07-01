@@ -274,6 +274,30 @@ def check_position_count(state: AccountState, limits: RiskLimits) -> tuple[bool,
 # ============================================================================
 
 
+def _lookup_correlation(correlation_matrix: dict, symbol_x: str, symbol_y: str) -> float:
+    """Consulta `correlation_matrix` para o par (symbol_x, symbol_y),
+    tentando AMBAS as ordens de chave — (x, y) e (y, x) — porque a
+    matriz de correlação vinda da Camada 0 (`data_pipeline.py::
+    scan_hedge_candidates`) produz apenas UMA linha por par não-ordenado
+    de símbolos (não garante as duas direções (a,b) e (b,a) como chaves
+    distintas). Sem este fallback bidirecional, uma correlação real
+    ficaria silenciosamente tratada como 0.0 sempre que o chamador
+    consultasse a ordem de chave que a matriz não populou (ver 02-REVIEW.md,
+    finding sobre `aggregate_exposure_pct` ignorar `pair_b`/lookup reverso).
+    Usa abs() porque tanto correlação positiva como negativa forte
+    aumentam o risco de movimento conjunto adverso.
+
+    devolve:
+        (float) - abs(correlação) encontrada, ou 0.0 se nenhuma das duas
+            ordens de chave existir na matriz (sem correlação conhecida).
+    """
+    if (symbol_x, symbol_y) in correlation_matrix:
+        return abs(correlation_matrix[(symbol_x, symbol_y)])
+    if (symbol_y, symbol_x) in correlation_matrix:
+        return abs(correlation_matrix[(symbol_y, symbol_x)])
+    return 0.0
+
+
 def aggregate_exposure_pct(open_positions: list[dict], correlation_matrix: dict) -> float:
     """Calcula a exposição agregada, ajustada por correlação, das
     posições abertas — abordagem "variance-scaling" (D-07, ver
@@ -284,13 +308,24 @@ def aggregate_exposure_pct(open_positions: list[dict], correlation_matrix: dict)
     hedge). Com 0 ou 1 posições abertas não há correlação a ajustar —
     degrada graciosamente para a soma bruta.
 
+    Cada posição de hedge tem DUAS pernas (`pair_a`, `pair_b`) — a
+    correlação relevante entre duas posições abertas pode residir em
+    qualquer combinação das quatro pernas (a.pair_a/b.pair_a,
+    a.pair_a/b.pair_b, a.pair_b/b.pair_a, a.pair_b/b.pair_b), não só na
+    combinação pair_a-vs-pair_a. Usa-se o MÁXIMO abs(correlação) entre
+    as quatro combinações como a correlação efetiva desse par de
+    posições — a leitura conservadora correta para um limite de risco
+    (RISK-03/D-07): se qualquer uma das quatro pernas estiver
+    fortemente correlacionada, o risco de movimento conjunto adverso já
+    existe, mesmo que as outras três combinações sejam descorrelacionadas.
+
     params:
         open_positions      (list[dict]) - cada dict com pelo menos
             {"pair_a": str, "pair_b": str, "exposure_pct": float}
         correlation_matrix   (dict)      - lookup {(symbol_a, symbol_b): float}
-            de correlação entre símbolos (Camada 0, data_pipeline.py); usa
-            abs() porque tanto correlação positiva como negativa forte
-            aumentam o risco de movimento conjunto adverso.
+            de correlação entre símbolos (Camada 0, data_pipeline.py); pode
+            estar populada numa só ordem de chave por par de símbolos —
+            `_lookup_correlation()` tenta ambas as ordens.
 
     devolve:
         (float) - exposição agregada ajustada por correlação, comparável
@@ -306,7 +341,12 @@ def aggregate_exposure_pct(open_positions: list[dict], correlation_matrix: dict)
         for b in open_positions[i + 1:]
     ]
     corrs = [
-        abs(correlation_matrix.get((a["pair_a"], b["pair_a"]), 0.0))
+        max(
+            _lookup_correlation(correlation_matrix, a["pair_a"], b["pair_a"]),
+            _lookup_correlation(correlation_matrix, a["pair_a"], b["pair_b"]),
+            _lookup_correlation(correlation_matrix, a["pair_b"], b["pair_a"]),
+            _lookup_correlation(correlation_matrix, a["pair_b"], b["pair_b"]),
+        )
         for a, b in pairs
     ]
     avg_corr = sum(corrs) / len(corrs) if corrs else 0.0
