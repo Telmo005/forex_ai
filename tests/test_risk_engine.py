@@ -304,6 +304,67 @@ def test_absolute_drawdown_checked_before_daily_and_weekly():
 
 
 # ---------------------------------------------------------------------
+# D-14 (8b): new_position_exposure_pct negativo/NaN/infinito — rejeitado
+# ---------------------------------------------------------------------
+# Regressão do finding de 02-REVIEW.md: nenhum guard explícito existia
+# para valores negativos/NaN/infinitos de new_position_exposure_pct.
+# Um NaN falha silenciosamente todas as comparações Python (`NaN > x` é
+# sempre False), e um valor negativo grande podia mascarar exposição
+# real ao ser somado em aggregate_exposure_pct — ambos tinham de ser
+# rejeitados explicitamente antes de qualquer gate de exposição (D-06/D-07).
+
+def test_negative_new_position_exposure_rejected():
+    state = _healthy_account_state()
+    ok, reason = check_exposure_limits(state, EMPTY_CORR_MATRIX, DEFAULT_LIMITS,
+                                        new_position_exposure_pct=-0.50)
+    assert ok is False
+    assert reason == "invalid_exposure_input"
+
+    decision = _evaluate(_valid_proposal(), state, kill_switch_path="unused_no_such_file.flag",
+                          new_position_exposure_pct=-0.50)
+    assert decision.approved is False
+    assert decision.reject_reason == "invalid_exposure_input"
+    assert decision.size_lots == 0.0
+    assert decision.sl_price == 0.0
+
+
+def test_nan_new_position_exposure_rejected():
+    state = _healthy_account_state()
+    ok, reason = check_exposure_limits(state, EMPTY_CORR_MATRIX, DEFAULT_LIMITS,
+                                        new_position_exposure_pct=math.nan)
+    assert ok is False
+    assert reason == "invalid_exposure_input"
+
+    decision = _evaluate(_valid_proposal(), state, kill_switch_path="unused_no_such_file.flag",
+                          new_position_exposure_pct=math.nan)
+    assert decision.approved is False
+    assert decision.reject_reason == "invalid_exposure_input"
+
+
+def test_infinite_new_position_exposure_rejected():
+    state = _healthy_account_state()
+    ok, reason = check_exposure_limits(state, EMPTY_CORR_MATRIX, DEFAULT_LIMITS,
+                                        new_position_exposure_pct=math.inf)
+    assert ok is False
+    assert reason == "invalid_exposure_input"
+
+    decision = _evaluate(_valid_proposal(), state, kill_switch_path="unused_no_such_file.flag",
+                          new_position_exposure_pct=math.inf)
+    assert decision.approved is False
+    assert decision.reject_reason == "invalid_exposure_input"
+
+
+def test_zero_new_position_exposure_still_allowed():
+    """0.0 é o default e um valor legítimo (nenhuma nova posição de
+    exposição a somar) — o guard deve rejeitar apenas < 0, não == 0."""
+    state = _healthy_account_state()
+    ok, reason = check_exposure_limits(state, EMPTY_CORR_MATRIX, DEFAULT_LIMITS,
+                                        new_position_exposure_pct=0.0)
+    assert ok is True
+    assert reason is None
+
+
+# ---------------------------------------------------------------------
 # D-14 (9): exposição por par > 5% — rejeitado
 # ---------------------------------------------------------------------
 

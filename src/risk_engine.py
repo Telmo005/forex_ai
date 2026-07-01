@@ -369,9 +369,17 @@ def check_exposure_limits(state: AccountState, correlation_matrix: dict,
 
     devolve:
         (True, None)                    - dentro de ambos os limites
+        (False, "invalid_exposure_input") - new_position_exposure_pct não finito
+            (NaN/inf) ou negativo (D-14: input adversarial/malformado nunca
+            deve conseguir contornar um gate de risco por aritmética degenerada)
         (False, "max_pair_exposure")    - a própria nova posição já excede 5% sozinha (D-06)
         (False, "max_aggregate_exposure") - exposição agregada ajustada por correlação excede 15% (D-07)
     """
+    if not math.isfinite(new_position_exposure_pct) or new_position_exposure_pct < 0:
+        log.warning("new_position_exposure_pct inválido (NaN/inf/negativo): %r — rejeitado antes de qualquer gate de exposição",
+                    new_position_exposure_pct)
+        return False, "invalid_exposure_input"
+
     if new_position_exposure_pct > limits.max_pair_exposure_pct:
         log.warning("exposição da nova posição (%.2f%%) > limite por par D-06 (%.2f%%)",
                     new_position_exposure_pct * 100, limits.max_pair_exposure_pct * 100)
