@@ -129,6 +129,36 @@ bool CheckDrawdownBreaker(double equity,
 //| já deve ter sido aplicada pelo chamador antes de invocar esta     |
 //| função (mesma fórmula documentada em src/risk_limits.py:         |
 //| CORRELATION_ADJUSTMENT = "variance_scaling").                    |
+//|                                                                    |
+//| DESVIO DELIBERADO E ACEITE de RISK-07 só para D-07 (02-REVIEW.md, |
+//| Fase 2, iteração 1): ao contrário de CheckDrawdownBreaker (que    |
+//| recalcula dailyDD/weeklyDD/absoluteDD a partir de equity bruto) e |
+//| de CheckPositionCount (que recebe uma contagem inteira crua), esta|
+//| função NÃO recalcula o ajuste de correlação a partir de dados     |
+//| primitivos — recebe aggregateAdjustedPct já pronto. Isto significa|
+//| que, para D-07 especificamente, a redundância independente de     |
+//| RISK-07 é mais fraca: se a aritmética de correlação em Python     |
+//| (aggregate_exposure_pct(), src/risk_engine.py) tiver um bug, este  |
+//| lado MQL5 não tem forma de o apanhar sozinho — só reconfirma os    |
+//| dois limiares (por par e agregado) contra o valor já calculado.   |
+//|                                                                    |
+//| PORQUÊ ACEITE (não corrigido nesta fase): recalcular a agregação   |
+//| de correlação exigiria que o EA tivesse a sua própria matriz de    |
+//| correlação/cointegração (produto da Camada 0, `data_pipeline.py`), |
+//| que não existe em MQL5 e não faz parte do âmbito desta fase — dar  |
+//| ao EA essa matriz por parâmetro (ex.: um array de pares de string  |
+//| + doubles) violaria o princípio "função pura, sem I/O escondido"   |
+//| só para simular um passo de agregação que, para ser verdadeiramente|
+//| independente, precisaria de dados que este ficheiro simplesmente    |
+//| não tem ainda. Manter o pré-agregado como input é a opção          |
+//| estruturalmente correta HOJE; a alternativa correta a médio prazo  |
+//| (não implementada aqui) é a Fase 3/4 fazer a ponte de ficheiros    |
+//| Python->MQL5 também publicar um snapshot periódico da matriz de    |
+//| correlação (refrescado, não em tempo real) para que o EA possa     |
+//| recalcular aggregateAdjustedPct a partir de dados primitivos, tal  |
+//| como já faz para drawdown e contagem de posições — ver             |
+//| docs/risk_engine_mql5_spec.md e 02-REVIEW.md (WARNING 3) para o    |
+//| racional completo desta decisão.                                   |
 //+------------------------------------------------------------------+
 bool CheckExposureLimits(double &perPairExposurePcts[],
                          double aggregateAdjustedPct,

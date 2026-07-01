@@ -52,6 +52,21 @@ defesa antes de uma ordem real ser enviada à corretora.
   redundância intencional. Se o processo Python enviar algo
   inconsistente com o estado real da conta (ex.: por causa de uma falha
   de sincronização), o EA deve recusar, não confiar cegamente.
+  **Exceção conhecida e aceite (D-07, ver 02-REVIEW.md "WARNING 3" /
+  Fase 2):** `RiskGuard.mqh::CheckExposureLimits` recebe o valor
+  `aggregateAdjustedPct` (exposição agregada já ajustada por
+  correlação) pré-calculado do lado Python, em vez de recalcular a
+  agregação de correlação a partir de dados primitivos — ao contrário
+  de `CheckDrawdownBreaker`/`CheckPositionCount`, que recebem sempre
+  inputs crus e recalculam tudo localmente. Isto é aceite para a Fase 2
+  porque o EA não tem (ainda) acesso a uma matriz de
+  correlação/cointegração própria — esse dado só existe hoje na Camada
+  0 (`data_pipeline.py`). Tarefa em aberto para a Fase 3/4: a ponte de
+  ficheiros Python↔MQL5 deve publicar também um snapshot periódico
+  (refrescado, não em tempo real) da matriz de correlação relevante,
+  para que o EA possa recalcular `aggregateAdjustedPct` de forma
+  verdadeiramente independente, fechando esta lacuna de RISK-07
+  especificamente para D-07.
 - **Stop loss obrigatório em toda ordem**: nunca enviar uma ordem sem
   stop loss definido, mesmo que a estratégia seja "hedge-se sozinho" —
   falhas de comunicação ou bugs podem deixar uma perna sem a outra por
