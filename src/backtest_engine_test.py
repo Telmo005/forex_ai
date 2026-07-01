@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from backtest_engine import (
+    STANDARD_LOT_CONTRACT_SIZE,
     apply_transaction_costs,
     resolve_cost_params,
     run_hedge_backtest,
@@ -137,7 +138,8 @@ def test_resolve_cost_params_output_is_consumable_by_apply_transaction_costs():
 
     entry_std = 0.0012  # desvio-padrão de spread plausível de teste
     reference_lot_size = resolved.get("reference_lot_size", 1.0)
-    commission_r = resolved["commission_per_lot"] / reference_lot_size / entry_std
+    commission_price_units = resolved["commission_per_lot"] / reference_lot_size / STANDARD_LOT_CONTRACT_SIZE
+    commission_r = commission_price_units / entry_std
 
     result = apply_transaction_costs(
         pnl_r=2.0,

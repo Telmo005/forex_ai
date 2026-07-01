@@ -44,6 +44,17 @@ import pandas as pd
 
 COST_MODEL_VERSION = "placeholder-v1"  # bump sempre que os valores abaixo forem recalibrados com dados reais
 
+# Tamanho de contrato standard forex (1 lote = 100.000 unidades da divisa
+# base) — convenção universal de mercado, não um placeholder pendente de
+# calibração como os valores em DEFAULT_COST_PARAMS. Usado SÓ para
+# converter commission_per_lot ($/lote) em unidades de preço por unidade
+# negociada, antes de dividir por entry_std para exprimir a comissão em
+# "R" (ver run_hedge_backtest, bloco de fecho de trade) — sem esta
+# conversão, dividir diretamente $/lote por um desvio-padrão de spread
+# mistura unidades incompatíveis (dólares vs. preço) e produz um
+# commission_r sem sentido (ver Pitfall 2 do 01-RESEARCH.md desta fase).
+STANDARD_LOT_CONTRACT_SIZE = 100_000
+
 DEFAULT_COST_PARAMS: dict[str, dict[str, float]] = {
     # EURUSD: par mais líquido, spread tipicamente o mais apertado do mercado
     "EURUSD": {
@@ -282,15 +293,29 @@ def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict,
                 pnl_raw = position["direction"] * (spread_vals[i] - position["entry_spread"])
                 pnl_r = pnl_raw / entry_std if entry_std and entry_std > 0 else 0.0
                 if cost_params is not None:
-                    # Comissão é nativamente $/lote (não spread-std-dev) —
-                    # converte-se para "R" relativo ao entry_std deste trade,
-                    # assumindo reference_lot_size como o tamanho de posição
-                    # de referência (placeholder de validação, ver Pitfall 2
-                    # do 01-RESEARCH.md; a camada de risco, ainda por
-                    # construir, é quem decide o tamanho real).
+                    # Comissão é nativamente $/lote (não unidades de preço) —
+                    # não pode ser dividida diretamente por entry_std sem
+                    # antes converter para unidades de preço, ou o resultado
+                    # mistura dólares com desvios-padrão de spread (bug de
+                    # unidades). Usa-se o tamanho de contrato standard forex
+                    # (STANDARD_LOT_CONTRACT_SIZE = 100_000 unidades da
+                    # divisa base) para converter $/lote em unidades de
+                    # preço por unidade negociada, exatamente como
+                    # trade_tick_value faria via MT5 symbol_info() (ver
+                    # Pitfall 2 do 01-RESEARCH.md desta fase) — só depois se
+                    # divide por entry_std para obter "R", assumindo
+                    # reference_lot_size como o tamanho de posição de
+                    # referência (placeholder de validação; a camada de
+                    # risco, ainda por construir, é quem decide o tamanho
+                    # real).
                     reference_lot_size = cost_params.get("reference_lot_size", 1.0)
                     if entry_std and entry_std > 0 and reference_lot_size:
-                        commission_r = cost_params.get("commission_per_lot", 0.0) / reference_lot_size / entry_std
+                        commission_price_units = (
+                            cost_params.get("commission_per_lot", 0.0)
+                            / reference_lot_size
+                            / STANDARD_LOT_CONTRACT_SIZE
+                        )
+                        commission_r = commission_price_units / entry_std
                     else:
                         commission_r = 0.0
                     pnl_r = apply_transaction_costs(
