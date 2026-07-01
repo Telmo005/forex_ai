@@ -36,6 +36,19 @@ Ordem de avaliação em `evaluate_order` (fixa, não configurável):
 kill-switch -> drawdown -> contagem de posições -> exposição ->
 dimensionamento + stop-loss. Um "reject" em qualquer etapa interrompe a
 avaliação (short-circuit) e devolve a razão exata da rejeição.
+
+NOTA DELIBERADA sobre operadores de comparação (02-REVIEW.md, info):
+os limites de EXPOSIÇÃO (D-06/D-07, `check_exposure_limits`) usam `>`
+estrito — estar EXATAMENTE no limite (5.00%/15.00%) é permitido — enquanto
+os disjuntores de DRAWDOWN (D-03/D-04/D-05) e a CONTAGEM de posições
+(D-08) usam `>=` — estar exatamente no limite já rejeita. Isto é
+intencional, não uma inconsistência a "corrigir": exposição é um input
+contínuo de dimensionamento que raramente cai exatamente na fronteira,
+enquanto contagem de posições é um inteiro discreto onde "a 4ª posição"
+tem de ser bloqueada de forma exata, e drawdown é um disjuntor de
+segurança onde atingir o limite exato já deve bloquear. Ambos os lados
+(Python/MQL5) concordam nesta escolha por-check (RISK-07 mantém-se) —
+ver o mesmo comentário em `mql5/RiskGuard.mqh`.
 """
 
 from __future__ import annotations
@@ -43,11 +56,18 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any
 
 from src.risk_limits import RiskLimits
 
 log = logging.getLogger("risk_engine")
+
+# Piso abaixo do qual um avg_loss_r não-nulo é tratado como se fosse zero
+# ao calcular payoff_ratio em resolve_kelly_inputs() — evita uma divisão
+# quase-por-zero inflacionar artificialmente o Kelly sizing (02-REVIEW.md,
+# info). Escolhido bem abaixo de qualquer avg_loss_r realista em unidades
+# de "R" (múltiplos de desvio-padrão do spread) — um valor real nesta
+# grandeza indicaria um artefacto de arredondamento, não um trade real.
+_MIN_ABS_AVG_LOSS_R = 1e-6
 
 
 # ============================================================================
@@ -487,9 +507,23 @@ def resolve_kelly_inputs(strategy_record: dict) -> tuple[float, float]:
     # disponíveis diretamente — ambos expressam a mesma razão ganho/perda
     # sob a forma agregada vs. média; preferir avg_win_r/avg_loss_r quando
     # presentes no registo, por serem a definição mais direta.
+    #
+    # Guard (02-REVIEW.md, info): `avg_loss_r not in (None, 0)` só exclui um
+    # zero EXATO — um avg_loss_r não-nulo mas ínfimo (ex.: 1e-12, um
+    # artefacto de arredondamento plausível vindo de strategy_registry.py)
+    # produziria um payoff_ratio absurdamente inflacionado, que fluiria
+    # diretamente para kelly_fraction() e poderia gerar um tamanho de
+    # posição desproporcional (ainda floored em >= 0, mas sem teto). Usa-se
+    # aqui um piso (_MIN_ABS_AVG_LOSS_R) abaixo do qual avg_loss_r é tratado
+    # como se fosse zero, caindo para o proxy profit_factor em vez de uma
+    # divisão quase-por-zero.
     avg_win_r = strategy_record.get("avg_win_r")
     avg_loss_r = strategy_record.get("avg_loss_r")
-    if avg_win_r is not None and avg_loss_r not in (None, 0):
+    if (
+        avg_win_r is not None
+        and avg_loss_r not in (None, 0)
+        and abs(float(avg_loss_r)) >= _MIN_ABS_AVG_LOSS_R
+    ):
         payoff_ratio = abs(float(avg_win_r) / float(avg_loss_r))
     else:
         payoff_ratio = profit_factor
@@ -617,7 +651,11 @@ def evaluate_order(proposal: OrderProposal, state: AccountState, limits: RiskLim
     devolve:
         RiskDecision - ver dataclass acima; approved=True implica sempre
             size_lots > 0.0 e sl_price > 0.0; approved=False implica
-            size_lots=0.0, sl_price=0.0 e reject_reason não-nulo.
+            size_lots=0.0, sl_price=0.0 e reject_reason não-nulo. size_lots
+            (fração de Kelly) é sempre <= limits.max_pair_exposure_pct
+            (D-06) — clamped explicitamente (02-REVIEW.md, info), para que
+            o valor efetivamente aprovado respeite o mesmo limite por par
+            que new_position_exposure_pct só valida como proxy de input.
     """
     dd_pct = drawdown_pct_of_limit(state, limits)
     base_kwargs = {
@@ -653,6 +691,24 @@ def evaluate_order(proposal: OrderProposal, state: AccountState, limits: RiskLim
     size_fraction = size_position(proposal.win_rate, proposal.payoff_ratio, limits)
     if size_fraction <= 0.0:
         return _reject("non_positive_edge")
+
+    # D-06 cap (02-REVIEW.md, info): check_exposure_limits() só valida o
+    # valor PROXY new_position_exposure_pct fornecido pelo chamador contra
+    # o limite por par — nada até aqui garante que o size_lots realmente
+    # devolvido (dimensionado por Kelly, a partir de win_rate/payoff_ratio,
+    # não de new_position_exposure_pct) respeita o mesmo limite D-06. Sem
+    # este clamp, um chamador podia passar uma new_position_exposure_pct
+    # pequena para passar o gate enquanto o size_fraction Kelly-derivado
+    # ficava muito maior, quebrando a garantia de D-06 no valor efetivamente
+    # aprovado. Aplica-se aqui o mesmo teto — nunca aumenta o tamanho, só
+    # reduz um size_fraction que já exceda o limite por par.
+    if size_fraction > limits.max_pair_exposure_pct:
+        log.warning(
+            "size_fraction Kelly-derivado (%.4f) > limite por par D-06 (%.4f) — "
+            "clamped para respeitar D-06 no size_lots efetivamente aprovado",
+            size_fraction, limits.max_pair_exposure_pct,
+        )
+        size_fraction = limits.max_pair_exposure_pct
 
     try:
         sl_price = compute_stop_loss_price(

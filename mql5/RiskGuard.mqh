@@ -52,6 +52,13 @@
 // ambos os lados confirmados como concordantes (checklist de revisão de
 // código, não um passo de geração automática — ver 02-RESEARCH.md
 // "Don't Hand-Roll").
+//
+// NOTA DELIBERADA sobre operadores de comparação (02-REVIEW.md, info):
+// CheckExposureLimits usa `>` estrito (exatamente no limite D-06/D-07 é
+// permitido), enquanto CheckDrawdownBreaker e CheckPositionCount usam
+// `>=` (exatamente no limite já rejeita). Intencional, não uma
+// inconsistência — ver o mesmo comentário em src/risk_engine.py para o
+// racional completo. Ambos os lados concordam por-check (RISK-07).
 //+------------------------------------------------------------------+
 #property strict
 

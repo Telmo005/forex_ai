@@ -42,6 +42,7 @@ from src.risk_engine import (
     check_position_count,
     evaluate_order,
     kelly_fraction,
+    resolve_kelly_inputs,
     validate_order_proposal,
 )
 from src.risk_limits import RiskLimits
@@ -584,7 +585,12 @@ def test_combined_drawdown_exposure_and_position_count_breach_rejected():
 # ---------------------------------------------------------------------
 
 def test_valid_order_approved_with_positive_sl_and_quarter_kelly_size():
-    proposal = _valid_proposal(win_rate=0.6, payoff_ratio=1.5, entry_price=1.1000,
+    # win_rate/payoff_ratio escolhidos para que o size_fraction 0.25x-Kelly
+    # resultante fique ABAIXO do limite por par D-06 (5%) — este teste
+    # prova o caminho normal (sem clamp) da matemática de 0.25x-Kelly; ver
+    # test_kelly_derived_size_lots_clamped_to_max_pair_exposure_pct para o
+    # caso em que o clamp D-06 é exercido.
+    proposal = _valid_proposal(win_rate=0.52, payoff_ratio=1.3, entry_price=1.1000,
                                 stop_distance_price_units=0.0050, direction=1)
     state = _healthy_account_state()
     decision = _evaluate(proposal, state, kill_switch_path="unused_no_such_file.flag",
@@ -595,12 +601,16 @@ def test_valid_order_approved_with_positive_sl_and_quarter_kelly_size():
     assert decision.sl_price > 0.0
     assert decision.sl_price == proposal.entry_price - proposal.stop_distance_price_units
 
-    expected_size = kelly_fraction(0.6, 1.5, fraction=DEFAULT_LIMITS.kelly_fraction)
+    expected_size = kelly_fraction(0.52, 1.3, fraction=DEFAULT_LIMITS.kelly_fraction)
     assert expected_size > 0.0
+    assert expected_size < DEFAULT_LIMITS.max_pair_exposure_pct, (
+        "pré-condição do teste: o tamanho esperado tem de ficar abaixo do "
+        "clamp D-06 para que este teste isole a matemática de Kelly, não o clamp"
+    )
     assert math.isclose(decision.size_lots, expected_size, rel_tol=1e-9)
     # Confirma explicitamente que a fração aplicada é 0.25x (D-01), não
     # Kelly completo nem outra fração arbitrária.
-    full_kelly = kelly_fraction(0.6, 1.5, fraction=1.0)
+    full_kelly = kelly_fraction(0.52, 1.3, fraction=1.0)
     assert math.isclose(decision.size_lots, full_kelly * 0.25, rel_tol=1e-9)
 
 
@@ -611,6 +621,35 @@ def test_valid_short_direction_order_approved_with_sl_above_entry():
 
     assert decision.approved is True
     assert decision.sl_price == proposal.entry_price + proposal.stop_distance_price_units
+
+
+# ---------------------------------------------------------------------
+# D-06 cap on the actually-returned size_lots (02-REVIEW.md, info):
+# a Kelly-derived size_fraction that would exceed the per-pair exposure
+# limit must be clamped to it, independent of whatever proxy
+# new_position_exposure_pct the caller supplied to pass check_exposure_limits.
+# ---------------------------------------------------------------------
+
+def test_kelly_derived_size_lots_clamped_to_max_pair_exposure_pct():
+    # win_rate=0.9, payoff_ratio=5.0 -> full Kelly f* = (5*0.9 - 0.1)/5 = 0.88,
+    # 0.25x Kelly = 0.22 -> well above D-06's 5% (0.05) per-pair cap.
+    proposal = _valid_proposal(win_rate=0.9, payoff_ratio=5.0)
+    state = _healthy_account_state()
+    # new_position_exposure_pct kept small (0.01) so it trivially passes
+    # check_exposure_limits — proving the clamp on size_lots is independent
+    # of that proxy value, not just a side effect of the exposure gate.
+    decision = _evaluate(proposal, state, kill_switch_path="unused_no_such_file.flag",
+                          new_position_exposure_pct=0.01)
+
+    unclamped_size = kelly_fraction(0.9, 5.0, fraction=DEFAULT_LIMITS.kelly_fraction)
+    assert unclamped_size > DEFAULT_LIMITS.max_pair_exposure_pct, (
+        "pré-condição do teste: o tamanho Kelly não-clamped tem de exceder D-06 "
+        "para que este teste prove algo"
+    )
+
+    assert decision.approved is True
+    assert decision.size_lots == DEFAULT_LIMITS.max_pair_exposure_pct
+    assert decision.size_lots < unclamped_size
 
 
 # ---------------------------------------------------------------------
@@ -644,6 +683,62 @@ def test_order_rejected_as_non_positive_edge_when_kelly_sizing_is_zero():
     assert decision.reject_reason == "non_positive_edge"
     assert decision.size_lots == 0.0
     assert decision.sl_price == 0.0
+
+
+# ---------------------------------------------------------------------
+# Edge: resolve_kelly_inputs não deve inflacionar payoff_ratio quando
+# avg_loss_r é não-nulo mas ínfimo (artefacto de arredondamento) —
+# regressão do finding de 02-REVIEW.md.
+# ---------------------------------------------------------------------
+
+def test_resolve_kelly_inputs_uses_avg_win_loss_when_avg_loss_r_is_healthy():
+    """Caso normal (controlo): avg_win_r/avg_loss_r bem afastados de
+    zero -> payoff_ratio calculado diretamente da sua razão, não do
+    proxy profit_factor."""
+    record = {
+        "wf_passed": 0,
+        "revalidated_on_real_data": 0,
+        "win_rate": 0.55,
+        "profit_factor": 1.2,
+        "avg_win_r": 2.0,
+        "avg_loss_r": -1.0,
+    }
+    win_rate, payoff_ratio = resolve_kelly_inputs(record)
+    assert win_rate == 0.55
+    assert math.isclose(payoff_ratio, 2.0, rel_tol=1e-9)
+
+
+def test_resolve_kelly_inputs_falls_back_to_profit_factor_when_avg_loss_r_is_near_zero():
+    """avg_loss_r=1e-12 (não é exatamente 0, mas é um artefacto de
+    arredondamento ínfimo) não deve produzir um payoff_ratio absurdamente
+    inflacionado (2.0 / 1e-12) — deve cair para o proxy profit_factor,
+    tal como aconteceria se avg_loss_r fosse exatamente 0."""
+    record = {
+        "wf_passed": 0,
+        "revalidated_on_real_data": 0,
+        "win_rate": 0.55,
+        "profit_factor": 1.2,
+        "avg_win_r": 2.0,
+        "avg_loss_r": 1e-12,
+    }
+    win_rate, payoff_ratio = resolve_kelly_inputs(record)
+    assert win_rate == 0.55
+    assert math.isclose(payoff_ratio, 1.2, rel_tol=1e-9), (
+        "avg_loss_r ínfimo deve cair para o proxy profit_factor, não produzir um payoff_ratio inflacionado"
+    )
+
+
+def test_resolve_kelly_inputs_falls_back_to_profit_factor_when_avg_loss_r_is_exactly_zero():
+    record = {
+        "wf_passed": 0,
+        "revalidated_on_real_data": 0,
+        "win_rate": 0.55,
+        "profit_factor": 1.2,
+        "avg_win_r": 2.0,
+        "avg_loss_r": 0,
+    }
+    win_rate, payoff_ratio = resolve_kelly_inputs(record)
+    assert math.isclose(payoff_ratio, 1.2, rel_tol=1e-9)
 
 
 # ---------------------------------------------------------------------
