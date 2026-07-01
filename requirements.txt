@@ -1,0 +1,18 @@
+pandas
+numpy
+statsmodels
+hmmlearn
+pyarrow
+scikit-learn
+lightgbm
+streamlit
+plotly
+
+# Só necessário em modo --mode mt5 (Windows, terminal MT5 instalado e aberto):
+# MetaTrader5
+
+# Para a camada 1 (modelo de ML), instalar à medida que for necessário:
+# torch  # se for usar deep learning (LSTM/Transformer) mais tarde
+
+# Para comunicação Python<->MQL5 via socket (alternativa ao ficheiro partilhado):
+# pyzmq

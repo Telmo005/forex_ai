@@ -1,0 +1,27 @@
+# Dados gerados - não versionar
+output/
+*.parquet
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Credenciais - NUNCA versionar
+.env
+*credentials*
+secrets.json
+
+# MQL5 compilado
+*.ex5
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
