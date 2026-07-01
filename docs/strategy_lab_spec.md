@@ -64,10 +64,15 @@ dados reais da corretora, pode fazer sentido ser mais exigente).
 ## Modelo de custos de transação
 
 `src/backtest_engine.py` expõe `DEFAULT_COST_PARAMS` (dict por símbolo),
-`COST_MODEL_VERSION` ("placeholder-v1") e `resolve_cost_params(pair_a, pair_b)`
-como scaffolding para o backtest cost-aware (wiring dentro de
-`run_hedge_backtest()` acontece no plan 01-02 desta fase — aqui só existe a
-tabela e o resolver).
+`COST_MODEL_VERSION` ("placeholder-v1"), `resolve_cost_params(pair_a, pair_b)`
+e `apply_transaction_costs()`. O modelo está totalmente ligado (plan 01-02
+desta fase): `run_hedge_backtest(price_a, price_b, params, cost_params=...)`
+subtrai spread, slippage e comissão de `pnl_r` no momento em que cada trade
+fecha — dentro do próprio loop de simulação, não como ajuste posterior — e
+`strategy_generator.run_strategy_lab` resolve `cost_params` por par e
+passa-os em TODO candidato testado, para que nenhum caminho de aprovação
+(gate manual do dashboard ou qualquer gate automático futuro) veja números
+cost-blind (CLAUDE.md regra 4 / VALID-02).
 
 **Componentes modelados** (CLAUDE.md regra 4 — custos entram sempre no
 backtest):
@@ -80,15 +85,22 @@ backtest):
   lote standard) usado APENAS para exprimir a comissão em unidades "R"
   durante esta validação — não é o dimensionamento real de posição, que
   continua a ser responsabilidade exclusiva da camada de risco (secção
-  "PnL em unidades R" acima).
+  "PnL em unidades R" acima). A conversão de $/lote para "R" passa primeiro
+  por `STANDARD_LOT_CONTRACT_SIZE` (100.000 unidades da divisa base, a
+  convenção universal de contrato forex) para obter unidades de preço, só
+  depois dividindo por `entry_std` — dividir $/lote diretamente por
+  `entry_std` misturaria dólares com desvios-padrão de preço.
 
 **Origem dos valores atuais — placeholders, não dados reais.** Os valores em
 `DEFAULT_COST_PARAMS` vêm de intervalos publicados de mercado para pares
 forex major (~0.1-3 pips de spread, ~$2-7/lote de comissão round-turn,
 ~1-10 pips de slippage — ver `01-RESEARCH.md` desta fase), não da corretora
 real do utilizador. `COST_MODEL_VERSION = "placeholder-v1"` marca esta
-proveniência explicitamente. Cada entrada no dict tem um comentário inline
-"placeholder" no código-fonte.
+proveniência explicitamente e é persistido por estratégia em
+`strategy_registry` (`cost_model_version`) e mostrado no dashboard, para que
+qualquer estratégia testada com estes placeholders seja distinguível de uma
+futura revalidação com custos reais da corretora. Cada entrada no dict tem
+um comentário inline "placeholder" no código-fonte.
 
 **Quando substituir.** Assim que existir uma ligação MT5 demo validada
 (`data_pipeline.fetch_mt5`), os valores devem ser recalculados a partir de
@@ -99,8 +111,7 @@ distinguível de uma revalidada com custos reais.
 
 `resolve_cost_params(pair_a, pair_b)` soma o custo das duas pernas do hedge
 (cada perna paga o seu próprio spread/slippage/comissão) e devolve um único
-dict pronto a passar para `run_hedge_backtest()` quando essa ligação for
-feita no plan 01-02.
+dict pronto a passar para `run_hedge_backtest()`.
 
 ## Como correr
 
@@ -133,3 +144,13 @@ validação no histórico real.
   Antes de qualquer execução real, correr o mesmo conjunto de parâmetros
   aprovados num período de dados COMPLETAMENTE separado (out-of-sample)
   que não foi usado durante a geração/seleção.
+- ~~O backtest não modela custos de transação~~ — **RESOLVIDO no plan
+  01-02 desta fase (VALID-02).** `run_hedge_backtest()` subtrai spread,
+  slippage e comissão de `pnl_r` no momento em que cada trade fecha (ver
+  secção "Modelo de custos de transação" acima), `strategy_generator.py`
+  resolve e passa `cost_params` para todo o candidato testado, e o
+  dashboard mostra só métricas net-of-cost (sem toggle para ver números
+  cost-blind). O gap que resta é de CALIBRAÇÃO, não de wiring: os valores
+  em `DEFAULT_COST_PARAMS` continuam a ser placeholders (`COST_MODEL_VERSION
+  = "placeholder-v1"`) pendentes de dados reais da corretora via
+  `symbol_info()` — ver "Quando substituir" acima.

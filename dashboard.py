@@ -35,7 +35,9 @@ def load(db_path: str) -> pd.DataFrame:
 st.title("🔬 Forex AI — Strategy Lab")
 st.caption(
     "Cada linha é uma estratégia de hedge gerada e testada automaticamente no histórico. "
-    "Estado, estatísticas e curva de equity de cada uma, para validares antes de avançar para a camada de risco/execução."
+    "Estado, estatísticas e curva de equity de cada uma, para validares antes de avançar para a camada de risco/execução. "
+    "**Todas as métricas apresentadas incluem custos de transação modelados (spread, slippage, comissão) — "
+    "não existe nenhuma vista sem custos.**"
 )
 
 df = load(DB_PATH)
@@ -49,6 +51,22 @@ if df.empty:
     st.stop()
 
 # ---------------------------------------------------------------------
+# Badge do modelo de custos ativo (VALID-02: nenhuma métrica é cost-blind)
+# ---------------------------------------------------------------------
+if "cost_model_version" in df.columns and df["cost_model_version"].notna().any():
+    versions = sorted(v for v in df["cost_model_version"].dropna().unique())
+    st.info(
+        "💰 Métricas net-of-cost — modelo de custos ativo: **" + ", ".join(versions) + "**. "
+        "Ver `docs/strategy_lab_spec.md` secção \"Modelo de custos de transação\" para os componentes modelados."
+    )
+else:
+    st.warning(
+        "Esta base de dados não tem a coluna `cost_model_version` preenchida — provavelmente foi gerada "
+        "antes do modelo de custos ser ligado ao backtest. As estatísticas apresentadas podem ser cost-blind. "
+        "Corre novamente `python src/strategy_generator.py` para regenerar com custos incluídos."
+    )
+
+# ---------------------------------------------------------------------
 # Resumo
 # ---------------------------------------------------------------------
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -56,7 +74,7 @@ c1.metric("Estratégias testadas", len(df))
 c2.metric("Aprovadas", int((df["status"] == "passed").sum()))
 c3.metric("Reprovadas", int((df["status"] == "failed").sum()))
 best_pf = df["profit_factor"].max()
-c4.metric("Melhor profit factor", f"{best_pf:.2f}")
+c4.metric("Melhor profit factor (net-of-cost)", f"{best_pf:.2f}")
 c5.metric("Gerações executadas", int(df["generation"].max()) + 1)
 
 st.divider()
