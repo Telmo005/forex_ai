@@ -207,7 +207,8 @@ def apply_transaction_costs(pnl_r: float, entry_std: float, cost_params: dict,
 # --------------------------------------------------------------------------
 
 def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict,
-                        cost_params: dict | None = None) -> dict:
+                        cost_params: dict | None = None,
+                        score_start: int | None = None) -> dict:
     """Simula a lógica de entrada/saída de docs/hedge_engine_spec.md.
 
     params esperados:
@@ -231,6 +232,23 @@ def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict,
         a uso interno/debug; NUNCA deve ser o caminho usado por
         strategy_generator.py, dashboard.py ou qualquer gate de aprovação
         (CLAUDE.md regra 4 / VALID-02).
+
+    score_start (opcional, int | None):
+        Indice posicional (relativo a price_a/price_b APOS o alinhamento
+        interno feito abaixo, ou seja, bar 0 = primeira barra recebida) a
+        partir do qual um trade pode ser CONTABILIZADO nas estatisticas
+        devolvidas. Quando None (default, comportamento pre-existente),
+        todos os trades encontrados a partir de start = max(beta_window,
+        corr_window) sao contabilizados - e o caminho usado por
+        strategy_generator.py e por uma validacao de janela unica.
+        Quando fornecido (usado por walk_forward_validate(), fix do CR-01
+        de 01-REVIEW.md), permite passar dados de AQUECIMENTO (historico
+        real anterior ao fold de teste) concatenados antes da janela de
+        teste, para que beta/z-score/correlacao sejam calculados
+        causalmente com contexto real - mas so os trades cuja entry_bar
+        cai dentro da janela de teste (>= score_start) entram nas stats
+        devolvidas. Isto evita que barras de aquecimento sejam contadas
+        como se fossem parte do periodo out-of-sample avaliado.
     """
     # Alinhamento POSICIONAL (não por label) entre as duas séries — evita
     # que diferenças de timestamp entre símbolos (ex.: gerados em
@@ -264,6 +282,14 @@ def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict,
     trades = []
     position = None
     start = max(beta_window, corr_window)
+    # score_start define a partir de que barra um trade pode ser
+    # CONTABILIZADO (ver docstring acima) — não altera `start`, que continua
+    # a ser o corte de aquecimento das janelas rolling. Posições podem abrir
+    # ainda durante o aquecimento (start <= i < score_start) e fechar dentro
+    # da janela de teste; nesse caso o trade teria entry_bar < score_start e
+    # é corretamente excluído das stats (evita contar um trade cuja entrada
+    # não foi observada dentro do período out-of-sample avaliado).
+    score_cutoff = start if score_start is None else max(start, score_start)
 
     for i in range(start, n):
         z = z_vals[i]
@@ -323,17 +349,23 @@ def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict,
                         pnl_r, entry_std, {**cost_params, "commission_r": commission_r},
                         position["direction"],
                     )
-                trades.append({
-                    "entry_bar": int(position["entry_bar"]),
-                    "exit_bar": int(i),
-                    "bars_held": int(bars_held),
-                    "direction": int(position["direction"]),
-                    "pnl_r": round(float(pnl_r), 4),
-                    "exit_reason": exit_reason,
-                })
+                if position["entry_bar"] >= score_cutoff:
+                    # Só conta trades cuja ENTRADA ocorreu dentro da janela
+                    # avaliada — uma posição aberta durante o aquecimento
+                    # (entry_bar < score_cutoff) não foi realmente observada
+                    # no período out-of-sample, mesmo que feche dentro dele.
+                    trades.append({
+                        "entry_bar": int(position["entry_bar"]),
+                        "exit_bar": int(i),
+                        "bars_held": int(bars_held),
+                        "direction": int(position["direction"]),
+                        "pnl_r": round(float(pnl_r), 4),
+                        "exit_reason": exit_reason,
+                    })
                 position = None
 
-    stats = compute_stats(trades, n)
+    bars_scored = n - score_cutoff if score_start is not None else n
+    stats = compute_stats(trades, bars_scored)
     return {"trades": trades, "stats": stats}
 
 
@@ -542,14 +574,26 @@ def walk_forward_validate(price_a: pd.Series, price_b: pd.Series, params: dict,
     all_oos_trades: list[dict] = []
 
     for fold_i, (train_idx, test_idx) in enumerate(tscv.split(range(n_common))):
-        # A janela de treino não é usada para refit (params já fixos) — só
-        # existe porque TimeSeriesSplit exige um par (train_idx, test_idx);
-        # espelha o workflow real onde beta/z-score são recalculados de
-        # forma causal até ao início do teste, mas nenhum parâmetro muda.
-        test_a = price_a.iloc[test_idx[0]:test_idx[-1] + 1]
-        test_b = price_b.iloc[test_idx[0]:test_idx[-1] + 1]
+        # CR-01 fix (01-REVIEW.md): a janela de treino NÃO é usada para
+        # refit (params já fixos) mas TEM de ser usada como contexto de
+        # AQUECIMENTO causal — sem isto, beta/z-score/correlação
+        # "cold-start" no bar 0 do fold de teste, sem lookback real, o que
+        # contradiz a premissa de que este mecanismo espelha o workflow real
+        # de recálculo rolling contínuo. Concatena-se train_idx + test_idx
+        # (histórico real imediatamente anterior ao fold) e passa-se
+        # score_start=len(train_idx) para que run_hedge_backtest() só
+        # contabilize trades cuja entrada ocorre dentro da janela de teste,
+        # mesmo que as janelas rolling já estejam "quentes" antes disso.
+        combined_start = train_idx[0]
+        combined_end = test_idx[-1] + 1
+        combined_a = price_a.iloc[combined_start:combined_end].reset_index(drop=True)
+        combined_b = price_b.iloc[combined_start:combined_end].reset_index(drop=True)
+        test_start_local = test_idx[0] - combined_start
 
-        result = run_hedge_backtest(test_a, test_b, params, cost_params=cost_params)
+        result = run_hedge_backtest(
+            combined_a, combined_b, params, cost_params=cost_params,
+            score_start=test_start_local,
+        )
         stats = result["stats"]
         passed, reasons = validate_strategy(stats, fold_thresholds)
 

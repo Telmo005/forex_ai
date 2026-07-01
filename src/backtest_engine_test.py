@@ -306,3 +306,117 @@ def test_walk_forward_every_fold_is_cost_aware():
         f_cost["stats"]["total_return_r"] < f_zero["stats"]["total_return_r"]
         for f_cost, f_zero in comparable
     ), "todo fold com trades deve ser net-of-cost mais baixo que a versão sem custo (VALID-02 em todos os folds, não só um)"
+
+
+# ---------------------------------------------------------------------
+# CR-01 (01-REVIEW.md): walk_forward_validate() deixou de descartar
+# train_idx — cada fold agora recebe o histórico de treino real como
+# aquecimento causal antes da janela de teste avaliada. Os testes abaixo
+# provam (1) que run_hedge_backtest() com score_start só contabiliza
+# trades cuja entrada cai dentro da janela avaliada, (2) que o aquecimento
+# vindo de train_idx efetivamente aquece beta/z-score mais cedo do que um
+# cold-start no bar 0 do fold, e (3) que os folds continuam a não contar
+# barras de aquecimento em duplicado nas stats agregadas.
+# ---------------------------------------------------------------------
+
+def test_run_hedge_backtest_score_start_excludes_trades_entered_before_cutoff():
+    price_a, price_b = _synthetic_pair(n=2000, seed=7)
+
+    result_full = run_hedge_backtest(price_a, price_b, DEFAULT_PARAMS, cost_params=None)
+    assert result_full["stats"]["total_trades"] > 0
+
+    # Escolhe um score_start a meio da série testada — qualquer trade cuja
+    # entry_bar caia antes disso NÃO pode aparecer no resultado com
+    # score_start, mesmo que a mesma barra 0 continue a ser usada para
+    # aquecer beta/z-score/correlação (a janela rolling em si é idêntica).
+    cutoff = 1000
+    result_scored = run_hedge_backtest(
+        price_a, price_b, DEFAULT_PARAMS, cost_params=None, score_start=cutoff,
+    )
+
+    assert len(result_scored["trades"]) > 0, (
+        "cenário de teste deveria produzir pelo menos um trade após o cutoff"
+    )
+    assert all(t["entry_bar"] >= cutoff for t in result_scored["trades"]), (
+        "nenhum trade com entry_bar < score_start pode ser contabilizado"
+    )
+    # Confirma que trades antes do cutoff existiam na run completa (senão o
+    # teste não provaria que algo foi de facto excluído).
+    trades_before_cutoff_full = [t for t in result_full["trades"] if t["entry_bar"] < cutoff]
+    assert len(trades_before_cutoff_full) > 0, (
+        "cenário de teste deveria ter trades antes do cutoff na run sem score_start"
+    )
+    # bars_tested no resultado com score_start reflete só a janela avaliada.
+    assert result_scored["stats"]["bars_tested"] == len(price_a) - cutoff
+
+
+def test_run_hedge_backtest_score_start_none_is_equivalent_to_full_scoring():
+    price_a, price_b = _synthetic_pair(n=2000, seed=7)
+
+    result_default = run_hedge_backtest(price_a, price_b, DEFAULT_PARAMS, cost_params=None)
+    result_explicit_none = run_hedge_backtest(
+        price_a, price_b, DEFAULT_PARAMS, cost_params=None, score_start=None,
+    )
+    assert result_default["trades"] == result_explicit_none["trades"]
+    assert result_default["stats"] == result_explicit_none["stats"]
+
+
+def test_walk_forward_validate_warms_up_beta_zscore_from_train_idx_not_cold_start():
+    """Prova o núcleo do fix CR-01: um fold recebe contexto de aquecimento
+    real (train_idx), pelo que trades podem ocorrer MUITO cedo dentro da
+    janela de teste (antes de max(beta_window, corr_window) barras terem
+    decorrido desde o INÍCIO do teste) — algo impossível no comportamento
+    anterior (bug), que tratava bar 0 do fold de teste como início de toda
+    a história e exigia max(beta_window, corr_window) barras "perdidas" no
+    início de cada fold antes de qualquer trade poder abrir."""
+    price_a, price_b = _synthetic_pair(n=6000, seed=11)
+
+    # beta_window/corr_window bem maiores que o tamanho do fold de teste:
+    # sob o bug antigo (cold start no bar 0 do teste), NENHUM trade seria
+    # possível em fold algum, porque `start = max(beta_window, corr_window)`
+    # excederia sempre o nº de barras do fold de teste.
+    config = {"n_splits": 8, "max_train_size": 2000, "gap": 0}
+    params = {**DEFAULT_PARAMS, "beta_window": 800, "corr_window": 300}
+
+    result = walk_forward_validate(price_a, price_b, params,
+                                    cost_params=WF_COST_PARAMS, config=config)
+
+    from sklearn.model_selection import TimeSeriesSplit
+
+    n_common = min(len(price_a), len(price_b))
+    tscv = TimeSeriesSplit(n_splits=config["n_splits"],
+                            max_train_size=config["max_train_size"],
+                            gap=config["gap"])
+    test_fold_sizes = [len(test_idx) for _, test_idx in tscv.split(range(n_common))]
+
+    # Confirma a premissa do teste: pelo menos um fold de teste é mais
+    # pequeno que beta_window, o que tornaria impossível qualquer trade sob
+    # o comportamento antigo (cold-start), mas é possível agora com
+    # aquecimento vindo de train_idx.
+    assert any(size < params["beta_window"] for size in test_fold_sizes), (
+        "cenário de teste deveria ter pelo menos um fold de teste menor que beta_window"
+    )
+
+    total_trades = sum(f["stats"]["total_trades"] for f in result["fold_results"])
+    assert total_trades > 0, (
+        "com aquecimento real de train_idx, deve haver trades mesmo com "
+        "folds de teste menores que beta_window/corr_window — o comportamento "
+        "antigo (cold start por fold) tornaria isto impossível"
+    )
+
+
+def test_walk_forward_validate_does_not_double_count_warmup_bars_across_folds():
+    """Cada trade contabilizado num fold tem entry_bar dentro da janela de
+    teste desse fold (nunca dentro do respetivo aquecimento) — logo o total
+    de trades agregado é exatamente a soma dos trades por fold, sem overlap
+    introduzido pela sobreposição de aquecimento entre folds consecutivos
+    (o aquecimento de um fold pode reutilizar barras já testadas por um
+    fold anterior, mas essas barras nunca são recontadas como teste)."""
+    price_a, price_b = _synthetic_pair(n=6000, seed=11)
+    config = {"n_splits": 5, "max_train_size": 1500, "gap": 0}
+
+    result = walk_forward_validate(price_a, price_b, DEFAULT_PARAMS,
+                                    cost_params=WF_COST_PARAMS, config=config)
+
+    per_fold_total = sum(f["stats"]["total_trades"] for f in result["fold_results"])
+    assert result["aggregate_stats"]["total_trades"] == per_fold_total
