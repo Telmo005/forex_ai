@@ -69,26 +69,29 @@ coverage:
     human_judgment: false
   - id: D5
     description: "MT5 demo connection probed for real-data availability (VALID-01 prerequisite)"
-    verification: []
+    verification:
+      - kind: other
+        ref: "python src/data_pipeline.py --mode mt5 --login 25340933 --server Tickmill-Demo -> connected, 19800 real bars/symbol fetched, output/features_*.parquet + hedge_candidates.csv regenerated from live MT5 data (5/21 pairs cointegrated on real data, vs 20/21 on synthetic)"
+        status: pass
     human_judgment: true
-    rationale: "Requires real MT5_LOGIN/MT5_PASSWORD/MT5_SERVER credentials from the user and a running, logged-in MT5 terminal — cannot be automated or fabricated. Blocked at Task 3 checkpoint; see Awaiting section below."
+    rationale: "Required real MT5_LOGIN/MT5_PASSWORD/MT5_SERVER credentials from the user (provided directly by user 2026-07-01) and a running, logged-in MT5 terminal. Connection succeeded — real data confirmed, not synthetic. revalidated_on_real_data prerequisite for plan 01-04 is now satisfiable."
 
 # Metrics
-duration: ~45min
+duration: ~45min (+ MT5 probe ~15min across two sessions)
 completed: 2026-07-01
-status: partial
+status: complete
 ---
 
 # Phase 1 Plan 1: Environment & Cost-Parameter Scaffolding Summary
 
-**Installed a working Python 3.12 interpreter (previously absent on this machine), generated synthetic strategy-lab inputs, and added a per-symbol transaction-cost default table + resolver to backtest_engine.py — MT5 real-data probe blocked pending user demo credentials.**
+**Installed a working Python 3.12 interpreter (previously absent on this machine), generated synthetic strategy-lab inputs, added a per-symbol transaction-cost default table + resolver to backtest_engine.py, and confirmed the MT5 demo connection works — real market data pulled and on disk.**
 
 ## Performance
 
-- **Duration:** ~45 min
+- **Duration:** ~45 min (Tasks 1-2) + ~15 min (Task 3, across two sessions after a checkpoint pause for user credentials)
 - **Started:** 2026-07-01T13:00:00Z (approx.)
-- **Completed:** 2026-07-01T13:36:16Z
-- **Tasks:** 2 of 3 completed (Task 3 blocked at checkpoint, awaiting user input)
+- **Completed:** 2026-07-01T16:34:48Z
+- **Tasks:** 3 of 3 completed
 - **Files modified:** 2 (`src/backtest_engine.py`, `docs/strategy_lab_spec.md`)
 
 ## Accomplishments
@@ -97,6 +100,7 @@ status: partial
 - **Generated strategy-lab input artifacts.** Ran `<python> src/data_pipeline.py --mode synth` successfully: produced `output/hedge_candidates.csv` (20 of 21 pairs cointegrated) and one `output/features_{SYMBOL}.parquet` per symbol (EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, NZDUSD, USDCHF — 7 files, 19,800 bars each).
 - **Added cost-parameter scaffolding to `backtest_engine.py`.** New `DEFAULT_COST_PARAMS` dict (per-symbol spread_cost/slippage_cost/commission_per_lot/reference_lot_size, all placeholder values pending real broker `symbol_info()` data), `COST_MODEL_VERSION = "placeholder-v1"`, and `resolve_cost_params(pair_a, pair_b)` helper that sums both legs' round-trip costs. `run_hedge_backtest()` signature is untouched — wiring is explicitly deferred to plan 01-02.
 - **Documented the cost model** in `docs/strategy_lab_spec.md` under a new "Modelo de custos de transação" subsection: components modeled, placeholder provenance, unit conventions, and the calibration trigger (once MT5 demo `symbol_info()` is live, recalibrate and bump `COST_MODEL_VERSION`).
+- **Confirmed the MT5 demo connection works.** Installed the `MetaTrader5` pip package (was missing, commented out in `requirements.txt` as Windows-conditional), then connected to the user's Tickmill-Demo account (login 25340933) and pulled 19,800 real bars per symbol across all 7 configured symbols. `output/features_*.parquet` and `output/hedge_candidates.csv` now hold real market data, not synthetic — 5 of 21 pairs cointegrated on real data (vs. 20/21 on synthetic, as expected: synthetic data is constructed to be cointegrated, real data is not).
 
 ## Task Commits
 
@@ -104,6 +108,7 @@ Each task was committed atomically:
 
 1. **Task 1: Resolve Python invocation and generate strategy-lab input artifacts** - No commit (produces only `output/` files, which are `.gitignore`d by project convention — nothing to stage; artifacts verified present on disk instead, see below)
 2. **Task 2: Add per-symbol transaction-cost default table and resolver to backtest_engine.py** - `e17aa54` (feat)
+3. **Task 3: Probe MT5 demo connection for real-data availability** - No commit (regenerates gitignored `output/` files only; `MetaTrader5` pip package installed as a system-level dependency, already declared conditionally in `requirements.txt`)
 
 **Plan metadata:** SUMMARY commit to follow immediately after this file.
 
@@ -111,8 +116,8 @@ Each task was committed atomically:
 
 - `src/backtest_engine.py` - Added `COST_MODEL_VERSION`, `DEFAULT_COST_PARAMS` (7 symbols + `_DEFAULT` fallback), `resolve_cost_params(pair_a, pair_b)`
 - `docs/strategy_lab_spec.md` - Added "Modelo de custos de transação" subsection
-- `output/hedge_candidates.csv` (gitignored, generated on disk) - 21 pairs tested, 20 cointegrated (synthetic data)
-- `output/features_{EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,USDCHF}.parquet` (gitignored, generated on disk) - 19,800 bars each with regime labels
+- `output/hedge_candidates.csv` (gitignored, generated on disk) - regenerated from real MT5 data in Task 3; 21 pairs tested, 5 cointegrated (real data, superseding the earlier synthetic 20/21 run)
+- `output/features_{EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,USDCHF}.parquet` (gitignored, generated on disk) - regenerated from real MT5 data in Task 3; 19,800 real bars each with regime labels
 
 ## Decisions Made
 
@@ -154,24 +159,14 @@ Evidence of prior absence (for audit trail): `where python` → only `AppData\Lo
 
 ## User Setup Required
 
-None generated as USER-SETUP.md — Task 3's requirement (MT5 demo credentials) is being surfaced instead as a live checkpoint since it blocks phase completion here (see "Next Phase Readiness" below), not deferred to a separate setup doc.
+None. Task 3's MT5 demo credentials were provided by the user directly and the connection succeeded — no outstanding setup for this plan.
 
 ## Next Phase Readiness
 
-**Blocked on Task 3 — MT5 demo connection probe (VALID-01 prerequisite).**
+**All 3 tasks complete.** `output/features_*.parquet` and `output/hedge_candidates.csv` on disk are now REAL MT5 demo data (Tickmill-Demo, login 25340933), not synthetic — plan 01-03/01-04 must treat this as the real-data baseline (`revalidated_on_real_data` can be set true against this data).
 
-Tasks 1 and 2 are complete and committed/verified. Task 3 requires the user to:
-1. Open the MetaTrader 5 desktop terminal and log into their demo account (leave it running).
-2. Provide `MT5_LOGIN`, `MT5_PASSWORD`, and `MT5_SERVER` for that demo account.
-
-Once provided, the remaining work is: run
-```
-C:\Users\Erick SG\AppData\Local\Programs\Python\Python312\python.exe src\data_pipeline.py --mode mt5 --login <MT5_LOGIN> --password <MT5_PASSWORD> --server "<MT5_SERVER>"
-```
-and confirm whether real `output/features_*.parquet` were regenerated from live MT5 data (SUCCESS — overwrites the synthetic ones already on disk, and this must be explicitly noted so plan 01-03 knows the parquet is real, not synthetic) or whether MT5 could not connect (UNAVAILABLE — record as an explicit blocker with the CSV-import fallback documented, and do NOT mark VALID-01 satisfied).
-
-**This plan does not consider VALID-01 or VALID-02 complete.** VALID-02's actual cost-aware wiring into `run_hedge_backtest()` happens in plan 01-02. VALID-01's real-data revalidation happens in plan 01-03, gated on this plan's Task 3 outcome.
+**This plan does not itself mark VALID-01 or VALID-02 as fully satisfied** (per plan design — that's intentional, not a gap): VALID-02's actual cost-aware wiring into `run_hedge_backtest()` happens in plan 01-02. VALID-01's formal walk-forward real-data revalidation of an *approved* strategy happens in plan 01-04, which can now proceed since real data is confirmed on disk.
 
 ---
 *Phase: 01-walk-forward-cost-aware-validation*
-*Completed: 2026-07-01 (partial — Task 3 pending user input)*
+*Completed: 2026-07-01 (all 3 tasks complete, including MT5 real-data confirmation)*
