@@ -61,6 +61,47 @@ Estes valores são um ponto de partida, não verdades absolutas — ajustar
 em `DEFAULT_THRESHOLDS` à medida que se valida com mais dados (ex.: em
 dados reais da corretora, pode fazer sentido ser mais exigente).
 
+## Modelo de custos de transação
+
+`src/backtest_engine.py` expõe `DEFAULT_COST_PARAMS` (dict por símbolo),
+`COST_MODEL_VERSION` ("placeholder-v1") e `resolve_cost_params(pair_a, pair_b)`
+como scaffolding para o backtest cost-aware (wiring dentro de
+`run_hedge_backtest()` acontece no plan 01-02 desta fase — aqui só existe a
+tabela e o resolver).
+
+**Componentes modelados** (CLAUDE.md regra 4 — custos entram sempre no
+backtest):
+- `spread_cost` — custo de spread, em unidades de preço (pips × point size
+  do símbolo), não em pips crus, para compor diretamente com
+  `spread = price_a - beta * price_b`.
+- `slippage_cost` — slippage modelado, mesma unidade de preço.
+- `commission_per_lot` — comissão USD por lote round-turn.
+- `reference_lot_size` — tamanho de posição assumido (placeholder, ex.: 1
+  lote standard) usado APENAS para exprimir a comissão em unidades "R"
+  durante esta validação — não é o dimensionamento real de posição, que
+  continua a ser responsabilidade exclusiva da camada de risco (secção
+  "PnL em unidades R" acima).
+
+**Origem dos valores atuais — placeholders, não dados reais.** Os valores em
+`DEFAULT_COST_PARAMS` vêm de intervalos publicados de mercado para pares
+forex major (~0.1-3 pips de spread, ~$2-7/lote de comissão round-turn,
+~1-10 pips de slippage — ver `01-RESEARCH.md` desta fase), não da corretora
+real do utilizador. `COST_MODEL_VERSION = "placeholder-v1"` marca esta
+proveniência explicitamente. Cada entrada no dict tem um comentário inline
+"placeholder" no código-fonte.
+
+**Quando substituir.** Assim que existir uma ligação MT5 demo validada
+(`data_pipeline.fetch_mt5`), os valores devem ser recalculados a partir de
+`symbol_info().spread` / `.point` / `.trade_tick_value` reais da corretora,
+e `COST_MODEL_VERSION` deve ser incrementado (ex.: `"broker-calibrated-v1"`)
+para que qualquer estratégia já registada com o modelo antigo seja
+distinguível de uma revalidada com custos reais.
+
+`resolve_cost_params(pair_a, pair_b)` soma o custo das duas pernas do hedge
+(cada perna paga o seu próprio spread/slippage/comissão) e devolve um único
+dict pronto a passar para `run_hedge_backtest()` quando essa ligação for
+feita no plan 01-02.
+
 ## Como correr
 
 ```bash

@@ -24,6 +24,109 @@ import pandas as pd
 
 
 # --------------------------------------------------------------------------
+# Modelo de custos de transação (spread + slippage + comissão)
+# --------------------------------------------------------------------------
+#
+# Valores placeholder pendentes de calibração com dados reais da corretora
+# (symbol_info().spread/point/trade_tick_value via MT5, ver
+# data_pipeline.fetch_mt5). Documentado em docs/strategy_lab_spec.md secção
+# "Modelo de custos de transacao". Fontes: intervalos publicados de mercado
+# para pares major (~0.1-3 pips spread, ~$2-7/lote comissão round-turn,
+# ~1-10 pips slippage) — ver 01-RESEARCH.md Pitfall 1.
+#
+# Unidades: spread_cost/slippage_cost já em UNIDADES DE PREÇO (não pips) —
+# isto é, pips * point size do símbolo — para compor diretamente com
+# `spread = price_a - beta * price_b` usado no resto deste módulo.
+# commission_per_lot é em USD por lote round-turn; reference_lot_size é a
+# assunção de tamanho de posição usada SÓ para exprimir a comissão em "R"
+# durante esta validação (a camada de risco, ainda não construída, é quem
+# decide o tamanho de posição real — ver Pitfall 2 do RESEARCH.md).
+
+COST_MODEL_VERSION = "placeholder-v1"  # bump sempre que os valores abaixo forem recalibrados com dados reais
+
+DEFAULT_COST_PARAMS: dict[str, dict[str, float]] = {
+    # EURUSD: par mais líquido, spread tipicamente o mais apertado do mercado
+    "EURUSD": {
+        "spread_cost": 0.00010,       # placeholder: ~1.0 pip (pendente symbol_info() real)
+        "slippage_cost": 0.00003,     # placeholder: ~0.3 pip
+        "commission_per_lot": 3.5,    # placeholder: USD por lote round-turn
+        "reference_lot_size": 1.0,    # placeholder: 1 lote standard, só para converter comissão em R
+    },
+    "GBPUSD": {
+        "spread_cost": 0.00015,       # placeholder: ~1.5 pips
+        "slippage_cost": 0.00004,     # placeholder: ~0.4 pip
+        "commission_per_lot": 4.0,    # placeholder
+        "reference_lot_size": 1.0,    # placeholder
+    },
+    "USDJPY": {
+        "spread_cost": 0.012,         # placeholder: ~1.2 pips (JPY tem point size diferente, 0.01)
+        "slippage_cost": 0.004,       # placeholder: ~0.4 pip
+        "commission_per_lot": 3.5,    # placeholder
+        "reference_lot_size": 1.0,    # placeholder
+    },
+    "AUDUSD": {
+        "spread_cost": 0.00016,       # placeholder: ~1.6 pips
+        "slippage_cost": 0.00005,     # placeholder: ~0.5 pip
+        "commission_per_lot": 4.5,    # placeholder
+        "reference_lot_size": 1.0,    # placeholder
+    },
+    "USDCAD": {
+        "spread_cost": 0.00018,       # placeholder: ~1.8 pips
+        "slippage_cost": 0.00005,     # placeholder: ~0.5 pip
+        "commission_per_lot": 4.5,    # placeholder
+        "reference_lot_size": 1.0,    # placeholder
+    },
+    "NZDUSD": {
+        "spread_cost": 0.00022,       # placeholder: ~2.2 pips (par menos líquido)
+        "slippage_cost": 0.00007,     # placeholder: ~0.7 pip
+        "commission_per_lot": 5.0,    # placeholder
+        "reference_lot_size": 1.0,    # placeholder
+    },
+    "USDCHF": {
+        "spread_cost": 0.00020,       # placeholder: ~2.0 pips
+        "slippage_cost": 0.00006,     # placeholder: ~0.6 pip
+        "commission_per_lot": 5.0,    # placeholder
+        "reference_lot_size": 1.0,    # placeholder
+    },
+    "_DEFAULT": {
+        "spread_cost": 0.00030,       # placeholder: ~3.0 pips — assunção conservadora para símbolo desconhecido
+        "slippage_cost": 0.00010,     # placeholder: ~1.0 pip
+        "commission_per_lot": 7.0,    # placeholder: teto superior do intervalo publicado
+        "reference_lot_size": 1.0,    # placeholder
+    },
+}
+
+
+def resolve_cost_params(pair_a: str, pair_b: str) -> dict:
+    """Combina o custo round-trip das duas pernas do hedge (pair_a + pair_b)
+    num único dict pronto a consumir por run_hedge_backtest() (wiring feito
+    em plan 01-02, não aqui).
+
+    params esperados (por símbolo, em DEFAULT_COST_PARAMS):
+        spread_cost         (float) - custo de spread em unidades de preço (pips * point)
+        slippage_cost       (float) - slippage modelado em unidades de preço
+        commission_per_lot  (float) - comissão USD por lote round-turn
+        reference_lot_size  (float) - lote assumido só para exprimir comissão em R
+
+    devolve:
+        spread_cost         (float) - soma das duas pernas
+        slippage_cost       (float) - soma das duas pernas
+        commission_per_lot  (float) - soma das duas pernas (cada perna paga a sua comissão)
+        reference_lot_size  (float) - reference_lot_size da perna A (ambas as pernas
+                                       assumem o mesmo tamanho de posição de referência)
+    """
+    cost_a = DEFAULT_COST_PARAMS.get(pair_a, DEFAULT_COST_PARAMS["_DEFAULT"])
+    cost_b = DEFAULT_COST_PARAMS.get(pair_b, DEFAULT_COST_PARAMS["_DEFAULT"])
+
+    return {
+        "spread_cost": cost_a["spread_cost"] + cost_b["spread_cost"],
+        "slippage_cost": cost_a["slippage_cost"] + cost_b["slippage_cost"],
+        "commission_per_lot": cost_a["commission_per_lot"] + cost_b["commission_per_lot"],
+        "reference_lot_size": cost_a["reference_lot_size"],
+    }
+
+
+# --------------------------------------------------------------------------
 # Beta dinâmico, z-score e correlação (todos causais, sem lookahead)
 # --------------------------------------------------------------------------
 
