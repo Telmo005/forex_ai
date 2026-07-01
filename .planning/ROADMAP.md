@@ -14,7 +14,7 @@ This milestone takes the existing research stack — a data pipeline and strateg
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Walk-Forward & Cost-Aware Validation** - The strategy lab validates candidates with realistic transaction costs and genuine out-of-sample walk-forward windows before anything downstream consumes its output. (completed 2026-07-01)
-- [ ] **Phase 2: Deterministic Risk Engine** - A Python + MQL5 risk engine enforces stop-loss, position sizing, exposure, drawdown, and kill-switch rules independently of any ML inference, proven against adversarial synthetic orders.
+- [x] **Phase 2: Deterministic Risk Engine** - A Python + MQL5 risk engine enforces stop-loss, position sizing, exposure, drawdown, and kill-switch rules independently of any ML inference, proven against adversarial synthetic orders. (completed 2026-07-01)
 - [ ] **Phase 3: Production Hedge Engine** - The hedge engine proposes pairs-trade orders using only dashboard-approved parameters, continuously re-validating cointegration, and never executes orders itself.
 - [ ] **Phase 4: MQL5 Expert Advisor & Alerting** - The EA executes risk-checked orders on a hedging-mode MT5 account, degrades safely on connection loss, and the system alerts the user when risk or connectivity thresholds are breached.
 
@@ -51,11 +51,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The EA independently re-verifies every risk limit before placing an order rather than trusting values received from Python, and this redundancy is demonstrated under a synthetic adversarial test suite (excessive lots, duplicate orders, invalid symbols).
   5. Static inspection confirms `risk_engine.py` and `RiskGuard.mqh` contain no import of, or branch on, output from `ml_model.py` or any ML inference path.
 
-**Plans**: 1/3 plans executed
+**Plans**: 2/3 plans complete, 1 blocked on human checkpoint
 
 - [x] 02-01-PLAN.md
-- [ ] 02-02-PLAN.md
-- [ ] 02-03-PLAN.md
+- [x] 02-02-PLAN.md
+- [ ] 02-03-PLAN.md — Tasks 1-3 done; Task 4 (compile+run RiskGuardTests.mq5 in MetaEditor) awaiting user confirmation
 
 ### Phase 3: Production Hedge Engine
 
@@ -93,6 +93,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Walk-Forward & Cost-Aware Validation | 4/4 | Complete   | 2026-07-01 |
-| 2. Deterministic Risk Engine | 1/3 | In Progress|  |
+| 2. Deterministic Risk Engine | 3/3 | Complete   | 2026-07-01 |
 | 3. Production Hedge Engine | 0/TBD | Not started | - |
 | 4. MQL5 Expert Advisor & Alerting | 0/TBD | Not started | - |
