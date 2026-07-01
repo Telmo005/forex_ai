@@ -124,11 +124,32 @@ def resolve_cost_params(pair_a: str, pair_b: str) -> dict:
         spread_cost         (float) - soma das duas pernas
         slippage_cost       (float) - soma das duas pernas
         commission_per_lot  (float) - soma das duas pernas (cada perna paga a sua comissão)
-        reference_lot_size  (float) - reference_lot_size da perna A (ambas as pernas
-                                       assumem o mesmo tamanho de posição de referência)
+        reference_lot_size  (float) - reference_lot_size partilhado pelas duas pernas
+                                       (ambas têm de assumir o mesmo tamanho de posição
+                                       de referência — ver ValueError abaixo se diferirem)
+
+    levanta:
+        ValueError - se pair_a e pair_b tiverem reference_lot_size diferentes.
+            commission_per_lot devolvido é a SOMA das duas pernas, e
+            run_hedge_backtest() divide essa soma por um único
+            reference_lot_size ao converter para "R" — se as pernas tivessem
+            valores diferentes, dividir a soma por apenas um deles produziria
+            um commission_r incorreto para a perna descartada (WR-04 do
+            01-REVIEW.md). Hoje todos os valores em DEFAULT_COST_PARAMS usam
+            1.0, por isso nunca diverge na prática — mas isto falha alto e
+            cedo assim que uma calibração real (MT5 symbol_info()) introduzir
+            valores diferentes por símbolo, em vez de silenciosamente
+            calcular um valor errado.
     """
     cost_a = DEFAULT_COST_PARAMS.get(pair_a, DEFAULT_COST_PARAMS["_DEFAULT"])
     cost_b = DEFAULT_COST_PARAMS.get(pair_b, DEFAULT_COST_PARAMS["_DEFAULT"])
+
+    if cost_a["reference_lot_size"] != cost_b["reference_lot_size"]:
+        raise ValueError(
+            f"reference_lot_size mismatch entre {pair_a} ({cost_a['reference_lot_size']}) "
+            f"e {pair_b} ({cost_b['reference_lot_size']}) — a conversão de commission_r "
+            "assume um único reference_lot_size partilhado pelas duas pernas."
+        )
 
     return {
         "spread_cost": cost_a["spread_cost"] + cost_b["spread_cost"],

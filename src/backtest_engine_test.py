@@ -156,6 +156,39 @@ def test_resolve_cost_params_output_is_consumable_by_apply_transaction_costs():
 
 
 # ---------------------------------------------------------------------
+# Test 6 (WR-04, 01-REVIEW.md): resolve_cost_params() levanta ValueError se
+# as duas pernas tiverem reference_lot_size diferentes, em vez de descartar
+# silenciosamente o valor de uma delas (bug hoje mascarado porque todas as
+# entradas em DEFAULT_COST_PARAMS usam 1.0).
+# ---------------------------------------------------------------------
+
+def test_resolve_cost_params_raises_on_reference_lot_size_mismatch():
+    import backtest_engine as be
+
+    original = be.DEFAULT_COST_PARAMS
+    patched = {
+        **original,
+        "EURUSD": {**original["EURUSD"], "reference_lot_size": 1.0},
+        "GBPUSD": {**original["GBPUSD"], "reference_lot_size": 0.5},
+    }
+    be.DEFAULT_COST_PARAMS = patched
+    try:
+        try:
+            be.resolve_cost_params("EURUSD", "GBPUSD")
+            assert False, "deveria ter levantado ValueError por reference_lot_size divergente"
+        except ValueError as exc:
+            assert "reference_lot_size" in str(exc)
+    finally:
+        be.DEFAULT_COST_PARAMS = original
+
+
+def test_resolve_cost_params_same_reference_lot_size_still_works():
+    # Caminho normal (hoje sempre 1.0/1.0) continua a funcionar sem levantar.
+    resolved = resolve_cost_params("EURUSD", "USDJPY")
+    assert resolved["reference_lot_size"] == 1.0
+
+
+# ---------------------------------------------------------------------
 # Walk-forward tests (plan 01-03, VALID-01)
 # ---------------------------------------------------------------------
 
