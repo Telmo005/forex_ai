@@ -394,6 +394,15 @@ def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict,
 # Estatísticas completas
 # --------------------------------------------------------------------------
 
+# Sentinela para profit_factor quando a amostra de trades não tem NENHUM
+# trade perdedor (gross_loss == 0 mas gross_win > 0) — divisão por zero não
+# é o comportamento desejado, mas um valor literal "real" de profit factor
+# também não existe nesse caso. NÃO é um profit factor genuíno; consumidores
+# (ex. dashboard.py) devem tratar este valor como "sem perdas na amostra" e
+# excluí-lo de agregados tipo "melhor profit factor" (WR-03, 01-REVIEW.md).
+PROFIT_FACTOR_NO_LOSSES_SENTINEL = 999.0
+
+
 def compute_stats(trades: list[dict], n_bars: int) -> dict:
     base = {
         "total_trades": 0, "win_rate": 0.0, "profit_factor": 0.0,
@@ -411,7 +420,20 @@ def compute_stats(trades: list[dict], n_bars: int) -> dict:
     win_rate = len(wins) / len(pnls)
     gross_win = wins.sum() if len(wins) else 0.0
     gross_loss = abs(losses.sum()) if len(losses) else 0.0
-    profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0)
+    # WR-03 (01-REVIEW.md): PROFIT_FACTOR_NO_LOSSES_SENTINEL (não um valor
+    # literal "real" de profit factor) marca o caso de zero trades
+    # perdedores na amostra — plausível para amostras pequenas perto do
+    # min_trades=20. Mantido como sentinela numérico finito (em vez de
+    # float("inf")) para que continue serializável em JSON sem ambiguidade
+    # (json.dumps(float("inf")) produz "Infinity", que não é JSON válido
+    # per RFC 8259, mesmo que o parser do Python o aceite). Consumidores
+    # (dashboard.py) devem tratar este valor explicitamente como "sem
+    # perdas na amostra", não como um profit factor de 999x real — ver
+    # PROFIT_FACTOR_NO_LOSSES_SENTINEL usado em dashboard.py.
+    profit_factor = (
+        (gross_win / gross_loss) if gross_loss > 0
+        else (PROFIT_FACTOR_NO_LOSSES_SENTINEL if gross_win > 0 else 0.0)
+    )
     sharpe = (pnls.mean() / pnls.std()) if pnls.std() > 0 else 0.0
 
     equity = np.cumsum(pnls)

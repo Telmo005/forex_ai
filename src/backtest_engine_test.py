@@ -18,9 +18,11 @@ import pandas as pd
 
 from backtest_engine import (
     FOLD_THRESHOLDS,
+    PROFIT_FACTOR_NO_LOSSES_SENTINEL,
     STANDARD_LOT_CONTRACT_SIZE,
     WALK_FORWARD_CONFIG,
     apply_transaction_costs,
+    compute_stats,
     resolve_cost_params,
     run_hedge_backtest,
     walk_forward_validate,
@@ -186,6 +188,29 @@ def test_resolve_cost_params_same_reference_lot_size_still_works():
     # Caminho normal (hoje sempre 1.0/1.0) continua a funcionar sem levantar.
     resolved = resolve_cost_params("EURUSD", "USDJPY")
     assert resolved["reference_lot_size"] == 1.0
+
+
+# ---------------------------------------------------------------------
+# Test (WR-03, 01-REVIEW.md): compute_stats() usa a sentinela nomeada
+# PROFIT_FACTOR_NO_LOSSES_SENTINEL (não um "999.0" mágico solto no código)
+# quando não há nenhum trade perdedor na amostra.
+# ---------------------------------------------------------------------
+
+def test_compute_stats_uses_named_sentinel_when_no_losing_trades():
+    trades_all_wins = [
+        {"pnl_r": 1.0, "bars_held": 10},
+        {"pnl_r": 2.0, "bars_held": 12},
+    ]
+    stats = compute_stats(trades_all_wins, n_bars=100)
+    assert stats["profit_factor"] == PROFIT_FACTOR_NO_LOSSES_SENTINEL
+
+    trades_mixed = [
+        {"pnl_r": 1.0, "bars_held": 10},
+        {"pnl_r": -0.5, "bars_held": 8},
+    ]
+    stats_mixed = compute_stats(trades_mixed, n_bars=100)
+    assert stats_mixed["profit_factor"] < PROFIT_FACTOR_NO_LOSSES_SENTINEL
+    assert abs(stats_mixed["profit_factor"] - 2.0) < 1e-9
 
 
 # ---------------------------------------------------------------------

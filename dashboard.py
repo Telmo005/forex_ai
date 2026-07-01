@@ -20,6 +20,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+from backtest_engine import PROFIT_FACTOR_NO_LOSSES_SENTINEL  # noqa: E402
 from strategy_registry import init_db, list_strategies  # noqa: E402
 
 st.set_page_config(page_title="Forex AI — Strategy Lab", layout="wide", page_icon="🔬")
@@ -85,8 +86,22 @@ c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Estratégias testadas", len(df))
 c2.metric("Aprovadas", int((df["status"] == "passed").sum()))
 c3.metric("Reprovadas", int((df["status"] == "failed").sum()))
-best_pf = df["profit_factor"].max()
+# WR-03 (01-REVIEW.md): PROFIT_FACTOR_NO_LOSSES_SENTINEL (999.0) marca "sem
+# trades perdedores na amostra", não um profit factor literal de 999x —
+# exclui-se do "melhor" para não induzir em erro quem lê o KPI de topo.
+# Se TODAS as estratégias forem sentinela (raro), cai para o próprio valor
+# (nan-safe via .max() vazio) e a legenda abaixo esclarece o que significa.
+finite_pf = df.loc[df["profit_factor"] < PROFIT_FACTOR_NO_LOSSES_SENTINEL, "profit_factor"]
+best_pf = finite_pf.max() if not finite_pf.empty else df["profit_factor"].max()
+has_sentinel = (df["profit_factor"] >= PROFIT_FACTOR_NO_LOSSES_SENTINEL).any()
 c4.metric("Melhor profit factor (net-of-cost)", f"{best_pf:.2f}")
+if has_sentinel:
+    c4.caption(
+        f"⚠️ {int((df['profit_factor'] >= PROFIT_FACTOR_NO_LOSSES_SENTINEL).sum())} "
+        f"estratégia(s) sem nenhum trade perdedor na amostra (profit factor "
+        f"marcado como {PROFIT_FACTOR_NO_LOSSES_SENTINEL:.0f} — não é um múltiplo "
+        "real, excluído deste KPI)."
+    )
 c5.metric("Gerações executadas", int(df["generation"].max()) + 1)
 # VALID-01: contagem de estratégias com revalidação walk-forward CONFIRMADA
 # em dados reais — distinta de wf_passed (que pode ter corrido só em
