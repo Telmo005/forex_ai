@@ -452,20 +452,23 @@ if(FileIsExist("KILL_SWITCH.flag", FILE_COMMON))
 
 ## Open Questions
 
-1. **Exact correlation-weighting formula for D-07 (variance-scaling vs. cluster-cap)**
+1. **(RESOLVED) Exact correlation-weighting formula for D-07 (variance-scaling vs. cluster-cap)**
    - What we know: Both approaches are standard, documented practitioner patterns (see Code Examples / Don't Hand-Roll); the spec states the principle but not the formula (explicitly left to planner/research per D-07's own text).
    - What's unclear: Which one better fits this project's specific pair-count (max 3 concurrent pairs / 6 legs per D-08) and correlation matrix shape (Engle-Granger cointegrated pairs from Layer 0, which by construction already tend to be correlated within a pair but not necessarily across pairs).
    - Recommendation: The planner should pick the variance-scaling approach (`(1 + avg_pairwise_correlation)`) as the primary recommendation — it degrades gracefully to `raw_sum` when there's only 0-1 positions open (no correlation to adjust for), and it's simpler to unit-test than a cluster-cap approach requiring a threshold + grouping step, while still satisfying "correlated pairs count more toward the limit."
+   - **Resolved:** Variance-scaling (`raw_sum * (1 + avg_pairwise_correlation)`) adopted as-recommended. Implemented in `02-01-PLAN.md` Task 2 (`src/risk_engine.py`'s exposure check), named `CORRELATION_ADJUSTMENT` and cited back to this document.
 
-2. **Where exactly should the kill-switch file live (path shared between Python cwd and MQL5's FILE_COMMON)?**
+2. **(RESOLVED) Where exactly should the kill-switch file live (path shared between Python cwd and MQL5's FILE_COMMON)?**
    - What we know: `docs/risk_engine_mql5_spec.md` names it `KILL_SWITCH.flag`; MQL5's `FileIsExist(..., FILE_COMMON)` reads from the terminal's shared "Common\Files" folder, not an arbitrary path.
    - What's unclear: The exact filesystem path Python should write to so both sides see the same file — this is inherently tied to the Phase 3/4 IPC bridge's shared folder convention, which doesn't exist yet.
    - Recommendation: For this phase, Python's `is_kill_switch_active()` can accept any path as a parameter (testable in isolation with a temp file); the *real* shared path only needs to be finalized when Phase 3's file-bridge module is built. Do not block this phase on resolving the exact path — keep it configurable.
+   - **Resolved:** Kept configurable, exactly as recommended. `KILL_SWITCH_PATH` is a default constant in `src/risk_limits.py` (`02-01-PLAN.md` Task 1); the real shared path is deferred to Phase 3/4's file-bridge module without blocking this phase.
 
-3. **Should `python-telegram-bot` be installed this phase, or should alerting be stubbed/deferred?**
-   - What we know: D-10/D-11 lock Telegram as the channel and define the trigger conditions; ALERT-01 itself is tagged as Phase 4 in REQUIREMENTS.md's traceability table, but D-11 says the 80%-of-limit *drawdown* trigger is this phase's concern (the EA-down and connection-loss triggers are Phase 4, since the EA/bridge don't exist yet).
-   - What's unclear: Whether the planner should build the actual Telegram-sending code now (drawdown-approaching-limit alert only) or stub the alert interface and defer real sending to Phase 4 when all three trigger conditions can be wired together.
-   - Recommendation: Build the drawdown-approaching-limit alert now (it's fully testable in isolation with synthetic account state, no bridge/EA dependency), using the zero-dependency `requests.post` approach from "Alternatives Considered" rather than adding `python-telegram-bot` — defers the package-installation decision without blocking the phase's own requirements.
+3. **(NOT APPLICABLE TO PHASE 2) Should `python-telegram-bot` be installed this phase, or should alerting be stubbed/deferred?**
+   - What we know: D-10/D-11 lock Telegram as the channel and define the trigger conditions; ALERT-01 itself is tagged as Phase 4 in REQUIREMENTS.md's traceability table.
+   - What's unclear (superseded): This question originally assumed the drawdown-approaching-limit alert should be built now. On replanning, the phase requirements were re-checked: RISK-01 through RISK-09 are Phase 2's only requirements, and none of them mention alerting — ALERT-01 is exclusively Phase 4's requirement.
+   - **Decision (supersedes the original recommendation below):** Phase 2 builds NO alerting code at all — no `alerts.py`, no `requests`/`python-telegram-bot` dependency, no Telegram-sending logic. Building the drawdown alert now (as originally recommended) would have been scope creep into Phase 4's requirement. Instead, `risk_engine.py` exposes the current drawdown percentage relative to each limit (daily/weekly/absolute) as clean queryable values on its decision/state objects — Phase 4's ALERT-01 work consumes these numbers to compute its 80%-of-nearest-limit trigger (D-11) and send the actual alert. Phase 2 exposes the numbers; Phase 4 owns the alerting logic and the `requests`/`python-telegram-bot` package decision. See `02-01-PLAN.md`'s objective deferral note.
+   - Original recommendation (no longer followed): Build the drawdown-approaching-limit alert now using the zero-dependency `requests.post` approach from "Alternatives Considered" rather than adding `python-telegram-bot".
 
 ## Environment Availability
 
