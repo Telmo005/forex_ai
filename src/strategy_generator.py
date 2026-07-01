@@ -44,7 +44,13 @@ def random_params(rng: random.Random) -> dict:
     params = {}
     for key, (lo, hi) in PARAM_RANGES.items():
         val = rng.uniform(lo, hi)
-        params[key] = int(val) if key in INT_PARAMS else round(val, 2)
+        # IN-02 (01-REVIEW.md): int(val) TRUNCA em vez de arredondar, o que
+        # enviesa sistematicamente os parâmetros inteiros (max_hold_bars,
+        # beta_window, corr_window) para baixo dentro do intervalo (ex.:
+        # int(rng.uniform(200, 800)) nunca produz 800, e arredonda toda
+        # fração para baixo em vez de para o inteiro mais próximo).
+        # int(round(val)) elimina esse enviesamento sem sair de [lo, hi].
+        params[key] = int(round(val)) if key in INT_PARAMS else round(val, 2)
     return params
 
 
@@ -54,7 +60,7 @@ def mutate_params(base: dict, rng: random.Random, strength: float = 0.25) -> dic
         span = hi - lo
         delta = rng.uniform(-strength, strength) * span
         val = max(lo, min(hi, base[key] + delta))
-        new[key] = int(val) if key in INT_PARAMS else round(val, 2)
+        new[key] = int(round(val)) if key in INT_PARAMS else round(val, 2)
     return new
 
 
