@@ -158,11 +158,44 @@ def compute_zscore(spread: pd.Series, window: int) -> tuple[pd.Series, pd.Series
     return zscore, std
 
 
+def apply_transaction_costs(pnl_r: float, entry_std: float, cost_params: dict,
+                             direction: int) -> float:
+    """Subtrai o custo round-trip modelado (spread + slippage + comissão)
+    do pnl_r bruto de um trade, no momento em que fecha.
+
+    Os custos de spread/slippage chegam em unidades de preço (a mesma
+    unidade de `spread = price_a - beta * price_b`) e são convertidos para
+    "R" dividindo por `entry_std` — o mesmo desvio-padrão do spread na
+    entrada que já normaliza `pnl_r` no resto deste módulo (ver docstring
+    do módulo). A comissão já deve chegar pré-convertida para "R" na chave
+    `commission_r` (ver Pitfall 2 do 01-RESEARCH.md desta fase: comissão é
+    nativamente $/lote, não spread-std-dev, por isso a conversão para R
+    exige uma assunção de tamanho de posição de referência, feita pelo
+    chamador antes de invocar esta função — não aqui).
+
+    `direction` (1 = long spread, -1 = short spread) não altera o sinal do
+    custo: custos de transação são sempre um dreno de PnL, independente do
+    lado da posição; o parâmetro existe para compatibilidade futura (ex.
+    custos assimétricos por lado) e não é usado na fórmula atual.
+
+    cost_params esperados:
+        spread_cost    (float) - custo de spread round-trip, em unidades de preço
+        slippage_cost  (float) - slippage modelado, em unidades de preço
+        commission_r   (float) - comissão já convertida para unidades "R"
+    """
+    if not entry_std or entry_std <= 0:
+        return pnl_r  # não é possível normalizar; mantém pnl_r inalterado
+    total_cost_price_units = cost_params.get("spread_cost", 0.0) + cost_params.get("slippage_cost", 0.0)
+    cost_r = total_cost_price_units / entry_std
+    return pnl_r - cost_r - cost_params.get("commission_r", 0.0)
+
+
 # --------------------------------------------------------------------------
 # Simulação da estratégia de hedge
 # --------------------------------------------------------------------------
 
-def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict) -> dict:
+def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict,
+                        cost_params: dict | None = None) -> dict:
     """Simula a lógica de entrada/saída de docs/hedge_engine_spec.md.
 
     params esperados:
@@ -173,6 +206,19 @@ def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict) -> 
         beta_window       (int)   - janela do hedge ratio
         corr_window       (int)   - janela de correlação/z-score
         recalc_every       (int, opcional) - cadência de recálculo do beta
+
+    cost_params (opcional, dict | None):
+        Custos de transação (spread, slippage, comissão) a subtrair de
+        cada trade em pnl_r, via apply_transaction_costs(). Chaves
+        esperadas (ver resolve_cost_params() acima):
+            spread_cost         (float) - custo de spread round-trip, em unidades de preço
+            slippage_cost       (float) - slippage modelado, em unidades de preço
+            commission_per_lot  (float) - comissão USD por lote round-turn
+            reference_lot_size  (float) - lote assumido para exprimir comissão em R
+        Quando None, nenhum custo é subtraído (path cost-blind) — reservado
+        a uso interno/debug; NUNCA deve ser o caminho usado por
+        strategy_generator.py, dashboard.py ou qualquer gate de aprovação
+        (CLAUDE.md regra 4 / VALID-02).
     """
     # Alinhamento POSICIONAL (não por label) entre as duas séries — evita
     # que diferenças de timestamp entre símbolos (ex.: gerados em
@@ -235,6 +281,22 @@ def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict) -> 
                 entry_std = position["entry_std"]
                 pnl_raw = position["direction"] * (spread_vals[i] - position["entry_spread"])
                 pnl_r = pnl_raw / entry_std if entry_std and entry_std > 0 else 0.0
+                if cost_params is not None:
+                    # Comissão é nativamente $/lote (não spread-std-dev) —
+                    # converte-se para "R" relativo ao entry_std deste trade,
+                    # assumindo reference_lot_size como o tamanho de posição
+                    # de referência (placeholder de validação, ver Pitfall 2
+                    # do 01-RESEARCH.md; a camada de risco, ainda por
+                    # construir, é quem decide o tamanho real).
+                    reference_lot_size = cost_params.get("reference_lot_size", 1.0)
+                    if entry_std and entry_std > 0 and reference_lot_size:
+                        commission_r = cost_params.get("commission_per_lot", 0.0) / reference_lot_size / entry_std
+                    else:
+                        commission_r = 0.0
+                    pnl_r = apply_transaction_costs(
+                        pnl_r, entry_std, {**cost_params, "commission_r": commission_r},
+                        position["direction"],
+                    )
                 trades.append({
                     "entry_bar": int(position["entry_bar"]),
                     "exit_bar": int(i),
