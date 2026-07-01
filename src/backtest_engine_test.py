@@ -130,6 +130,28 @@ def test_run_hedge_backtest_with_costs_yields_lower_total_return_than_without():
 
 
 # ---------------------------------------------------------------------
+# Test (IN-03, 01-REVIEW.md): run_hedge_backtest() falha alto se
+# cost_params já contiver 'commission_r' pré-calculado, em vez de o
+# sobrescrever silenciosamente com o valor computado internamente.
+# ---------------------------------------------------------------------
+
+def test_run_hedge_backtest_asserts_on_preexisting_commission_r_in_cost_params():
+    price_a, price_b = _synthetic_pair()
+    cost_params_with_commission_r = {
+        "spread_cost": 0.0005,
+        "slippage_cost": 0.0002,
+        "commission_per_lot": 5.0,
+        "reference_lot_size": 1.0,
+        "commission_r": 0.01,  # pré-calculado pelo chamador — não deve ser aceite silenciosamente
+    }
+    try:
+        run_hedge_backtest(price_a, price_b, DEFAULT_PARAMS, cost_params=cost_params_with_commission_r)
+        assert False, "deveria ter levantado AssertionError por commission_r pré-existente"
+    except AssertionError as exc:
+        assert "commission_r" in str(exc)
+
+
+# ---------------------------------------------------------------------
 # Test 5: contrato de dados resolve_cost_params() [01-01] -> apply_transaction_costs() [01-02]
 # ---------------------------------------------------------------------
 

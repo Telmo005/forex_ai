@@ -366,6 +366,18 @@ def run_hedge_backtest(price_a: pd.Series, price_b: pd.Series, params: dict,
                         commission_r = commission_price_units / entry_std
                     else:
                         commission_r = 0.0
+                    # IN-03 (01-REVIEW.md): {**cost_params, "commission_r": ...}
+                    # sobrescreveria silenciosamente uma chave "commission_r"
+                    # já presente em cost_params (ex. um futuro chamador que
+                    # a pré-calcule) sem aviso nenhum. resolve_cost_params()
+                    # nunca emite essa chave hoje, mas o contrato implícito
+                    # (só este bloco decide commission_r, nunca o chamador)
+                    # não estava documentado nem defendido — falha alto e
+                    # cedo em vez de mascarar um valor pré-calculado.
+                    assert "commission_r" not in cost_params, (
+                        "cost_params já contém 'commission_r' — este bloco é o único "
+                        "responsável por calculá-lo; um chamador não deve pré-computá-lo."
+                    )
                     pnl_r = apply_transaction_costs(
                         pnl_r, entry_std, {**cost_params, "commission_r": commission_r},
                         position["direction"],
