@@ -68,7 +68,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. `hedge_engine.py` produces order proposals that pass through the Phase 2 risk engine before reaching execution — it never places an order directly.
   3. A pair's cointegration is re-tested on a recurring schedule during live operation, and the hedge engine demonstrably exits or withholds a pair whose cointegration has broken down rather than treating the original test as permanent.
 
-**Plans**: TBD
+**Plans**: 2 plans
+
+- [ ] 03-01-PLAN.md — Pure decision core: HEDGE_PARAMS constants, strategy-eligibility loader (HEDGE-01), entry/exit signal evaluator, fail-closed cointegration re-check (HEDGE-03)
+- [ ] 03-02-PLAN.md — Risk-engine handoff shim (HEDGE-02), swappable parquet-replay feed, live-like loop wiring cointegration re-check on schedule
 
 ### Phase 4: MQL5 Expert Advisor & Alerting
 
@@ -94,5 +97,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Walk-Forward & Cost-Aware Validation | 4/4 | Complete   | 2026-07-01 |
 | 2. Deterministic Risk Engine | 3/3 | Complete   | 2026-07-01 |
-| 3. Production Hedge Engine | 0/TBD | Not started | - |
+| 3. Production Hedge Engine | 0/2 | Not started | - |
 | 4. MQL5 Expert Advisor & Alerting | 0/TBD | Not started | - |
