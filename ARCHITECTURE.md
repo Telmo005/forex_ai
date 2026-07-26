@@ -40,7 +40,7 @@ deve ter controlo direto sobre execução sem passar pela camada de risco.
                             │ sinal direcional + confiança + regime
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ 2. MOTOR DE HEDGE      src/hedge_engine.py        [POR FAZER]    │
+│ 2. MOTOR DE HEDGE      src/hedge_engine.py        [FEITO]        │
 │    Versão de PRODUÇÃO da lógica testada no laboratório (0.5),    │
 │    usando os parâmetros validados na UI. Decide quando            │
 │    abrir/ajustar/fechar pernas de cobertura entre pares          │
@@ -51,7 +51,7 @@ deve ter controlo direto sobre execução sem passar pela camada de risco.
                             │ ordens propostas (símbolo, lado, tamanho, motivo)
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ 3. MOTOR DE RISCO      src/risk_engine.py +       [POR FAZER]    │
+│ 3. MOTOR DE RISCO      src/risk_engine.py +       [FEITO]        │
 │                        mql5/RiskGuard.mqh                        │
 │    Camada determinística (NÃO-ML) que valida ou rejeita cada     │
 │    ordem proposta: tamanho via Kelly fracionado, exposição       │
@@ -62,11 +62,15 @@ deve ter controlo direto sobre execução sem passar pela camada de risco.
                             │ ordens aprovadas
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ 4. EXECUÇÃO (MQL5 EA)  mql5/ScalpingEA.mq5        [POR FAZER]    │
+│ 4. EXECUÇÃO (MQL5 EA)  mql5/ScalpingEA.mq5   [FEITO, NÃO TESTADO]│
 │    Expert Advisor dentro do terminal MT5. Recebe ordens          │
-│    aprovadas, executa, gere posições abertas, aplica stops.      │
-│    Continua a aplicar as regras de risco LOCALMENTE mesmo se a   │
-│    ligação ao processo Python cair (camada de segurança final).  │
+│    aprovadas via src/signal_bridge.py (JSON Lines, Common\Files),│
+│    executa, gere posições abertas, aplica stops. Continua a      │
+│    aplicar as regras de risco LOCALMENTE (RiskGuard.mqh) mesmo   │
+│    se a ligação ao processo Python cair (camada de segurança     │
+│    final) — modo "só gestão" quando o heartbeat expira.          │
+│    ESCRITO SEM COMPILAÇÃO/TESTE NUM TERMINAL MT5 REAL — ver      │
+│    checklist pré-conta-real em docs/risk_engine_mql5_spec.md.    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -118,9 +122,13 @@ corretora antes de produção, não só nos dados sintéticos de teste.
 
 ## Decisões em aberto (atualizar à medida que se decide)
 
-- [ ] Comunicação Python -> MQL5: ficheiro partilhado (simples, robusto,
-      latência ~1s) vs socket/ZeroMQ (mais rápido, mais complexo).
-      Para scalping a latência importa — provavelmente socket.
+- [x] Comunicação Python -> MQL5: **ficheiro partilhado, JSON Lines**
+      (`src/signal_bridge.py` escreve, `mql5/SignalBridge.mqh` lê) —
+      decidido para a v1 por simplicidade/robustez; latência ~1 ciclo de
+      polling (`PollingMillis`, default 500ms). Sem biblioteca de JSON
+      genérica em nenhum dos dois lados (esquema fixo e plano, parser
+      manual). Migrar para socket/ZeroMQ só se a latência se mostrar
+      insuficiente em conta demo (ver docs/risk_engine_mql5_spec.md).
 - [ ] Arquitetura do modelo de ML: começar com gradient boosting
       (LightGBM/XGBoost) sobre as features da camada 0 como baseline
       antes de ir para deep learning (LSTM/Transformer), que precisa de

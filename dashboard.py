@@ -235,7 +235,19 @@ elif pd.isna(row.get("wf_passed")):
         "```\npython src/revalidate_walk_forward.py\n```"
     )
 else:
-    fold_results = json.loads(row["wf_fold_results"]) if row.get("wf_fold_results") else []
+    # A partir de 2026-07-24, wf_fold_results guarda a estrutura COMPLETA
+    # de walk_forward_validate() (dict com "fold_results"/"aggregate_stats"),
+    # não só a lista de folds — é isso que risk_engine.resolve_kelly_inputs()
+    # já esperava desde a Fase 2. Bases de dados mais antigas (antes desta
+    # correção) ainda podem ter só a lista nua persistida; tratamos ambas as
+    # formas aqui em vez de assumir só a nova (degradar graciosamente).
+    wf_parsed = json.loads(row["wf_fold_results"]) if row.get("wf_fold_results") else []
+    if isinstance(wf_parsed, dict):
+        fold_results = wf_parsed.get("fold_results", [])
+        aggregate_stats = wf_parsed.get("aggregate_stats")
+    else:
+        fold_results = wf_parsed
+        aggregate_stats = None
     is_real = row.get("revalidated_on_real_data") == 1
 
     if is_real:
@@ -249,6 +261,14 @@ else:
         st.success("✅ Walk-forward APROVADO — todos os folds passaram o gate relaxado E o agregado passou o gate completo.")
     else:
         st.error("❌ Walk-forward REPROVADO — pelo menos um fold ou o agregado falhou o gate.")
+
+    if aggregate_stats:
+        st.markdown("**Estatísticas agregadas out-of-sample** (usadas pelo dimensionamento Kelly em produção, não as in-sample da geração original):")
+        agg_cols = st.columns(4)
+        agg_cols[0].metric("Nº trades (todos os folds)", aggregate_stats["total_trades"])
+        agg_cols[1].metric("Win rate", f"{aggregate_stats['win_rate']:.1%}")
+        agg_cols[2].metric("Profit factor", f"{aggregate_stats['profit_factor']:.2f}")
+        agg_cols[3].metric("Retorno total (R)", f"{aggregate_stats['total_return_r']:.2f}")
 
     if fold_results:
         fold_rows = []

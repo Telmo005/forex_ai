@@ -133,11 +133,20 @@ def revalidate_approved_strategies(
 
             wf_result = walk_forward_validate(price_a, price_b, params, cost_params=cost_params)
 
+            # Persiste a estrutura COMPLETA (fold_results + aggregate_stats),
+            # não só a lista de folds — risk_engine.resolve_kelly_inputs() já
+            # espera esta forma (dict com "aggregate_stats") desde a Fase 2
+            # para dimensionar via Kelly a partir das estatísticas out-of-
+            # sample mais conservadoras, em vez de cair silenciosamente para
+            # o proxy in-sample (win_rate/profit_factor da geração original).
+            # Bug corrigido 2026-07-24: só se passava wf_result["fold_results"]
+            # (a lista nua), o que fazia o guard `isinstance(fold_results, dict)`
+            # em resolve_kelly_inputs nunca disparar.
             save_walk_forward_result(
                 db_path,
                 strategy_id,
                 wf_passed=wf_result["overall_passed"],
-                wf_fold_results=wf_result["fold_results"],
+                wf_fold_results=wf_result,
                 revalidated_on_real_data=real_data,
             )
 

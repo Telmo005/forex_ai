@@ -91,10 +91,27 @@ def fetch_mt5(symbol: str, timeframe: str, n_bars: int,
                server: Optional[str] = None) -> pd.DataFrame:
     """Puxa histórico real via terminal MT5. Só funciona em Windows com o
     terminal instalado e a biblioteca MetaTrader5 (`pip install MetaTrader5`).
+
+    Quando login/password/server não são fornecidos (None — CLI sem
+    --login/--password/--server), `mt5.initialize()` é chamado SEM esses
+    argumentos, para se ligar à sessão já aberta e autenticada no terminal
+    MT5 em execução, em vez de tentar (e falhar) um novo login. Passar
+    `login=None` explicitamente a `mt5.initialize()` não é equivalente a
+    omitir o argumento — a biblioteca rejeita-o com
+    `(-2, 'Invalid "login" argument')` em vez de usar a sessão ativa
+    (bug confirmado em teste manual contra conta demo real, 2026-07-23).
     """
     import MetaTrader5 as mt5  # import local: só é exigido neste modo
 
-    if not mt5.initialize(login=login, password=password, server=server):
+    init_kwargs = {}
+    if login is not None:
+        init_kwargs["login"] = login
+    if password is not None:
+        init_kwargs["password"] = password
+    if server is not None:
+        init_kwargs["server"] = server
+
+    if not mt5.initialize(**init_kwargs):
         raise RuntimeError(f"Falha ao inicializar MT5: {mt5.last_error()}")
 
     tf_const = getattr(mt5, f"TIMEFRAME_{timeframe}")
@@ -320,9 +337,13 @@ def main():
     parser.add_argument("--login", type=int, default=None)
     parser.add_argument("--password", type=str, default=None)
     parser.add_argument("--server", type=str, default=None)
+    parser.add_argument("--n-bars", type=int, default=None,
+                         help="Nº de barras de histórico por símbolo (default: PipelineConfig.n_bars, 20000)")
     args = parser.parse_args()
 
     cfg = PipelineConfig()
+    if args.n_bars is not None:
+        cfg.n_bars = args.n_bars
     mt5_creds = {"login": args.login, "password": args.password, "server": args.server}
     run_pipeline(cfg, args.mode, mt5_creds)
 

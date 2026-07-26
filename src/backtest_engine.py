@@ -639,11 +639,21 @@ def walk_forward_validate(price_a: pd.Series, price_b: pd.Series, params: dict,
         # score_start=len(train_idx) para que run_hedge_backtest() só
         # contabilize trades cuja entrada ocorre dentro da janela de teste,
         # mesmo que as janelas rolling já estejam "quentes" antes disso.
-        combined_start = train_idx[0]
-        combined_end = test_idx[-1] + 1
+        # int() explícito (WR-05, encontrado em revalidação com dados reais
+        # 2026-07-23): TimeSeriesSplit.split() devolve índices em
+        # numpy.int64, não int nativo do Python. Sem este cast, test_start_local
+        # (numpy.int64) propaga-se para score_start em run_hedge_backtest(),
+        # depois para score_cutoff (via max(start, score_start), que promove
+        # o resultado a numpy.int64) e finalmente para stats["bars_tested"] —
+        # um valor numpy.int64 dentro do dict de stats falha
+        # json.dumps(wf_fold_results) em save_walk_forward_result() com
+        # "Object of type int64 is not JSON serializable". Casting aqui, na
+        # origem, evita que o dtype numpy entre em qualquer cálculo a jusante.
+        combined_start = int(train_idx[0])
+        combined_end = int(test_idx[-1] + 1)
         combined_a = price_a.iloc[combined_start:combined_end].reset_index(drop=True)
         combined_b = price_b.iloc[combined_start:combined_end].reset_index(drop=True)
-        test_start_local = test_idx[0] - combined_start
+        test_start_local = int(test_idx[0] - combined_start)
 
         result = run_hedge_backtest(
             combined_a, combined_b, params, cost_params=cost_params,
