@@ -554,7 +554,8 @@ FOLD_THRESHOLDS = {
 
 def walk_forward_validate(price_a: pd.Series, price_b: pd.Series, params: dict,
                            cost_params: dict | None = None,
-                           config: dict | None = None) -> dict:
+                           config: dict | None = None,
+                           backtest_fn=None) -> dict:
     """Revalida `params` (já fixos/aprovados) em folds sequenciais rolling
     out-of-sample, usando o mesmo run_hedge_backtest() cost-aware do resto
     deste módulo (VALID-01 + VALID-02 combinados: nenhum fold é cost-blind).
@@ -574,6 +575,18 @@ def walk_forward_validate(price_a: pd.Series, price_b: pd.Series, params: dict,
     config (opcional, dict | None): sobrepõe WALK_FORWARD_CONFIG
         (n_splits, max_train_size, gap, window_type). Default None usa
         WALK_FORWARD_CONFIG tal como está.
+
+    backtest_fn (opcional, callable | None): função de simulação a usar em
+        cada fold, mesma assinatura de run_hedge_backtest (price_a, price_b,
+        params, cost_params=None, score_start=None) -> {"trades", "stats"}.
+        Default None usa run_hedge_backtest (comportamento pré-existente,
+        inalterado). Permite a strategy_variants.run_backtest_for_type
+        revalidar out-of-sample estratégias de outra família (kalman,
+        vol_scaled_exit, asymmetric_bands) com a MESMA lógica que as gerou —
+        sem este parâmetro, revalidate_walk_forward.py revalidaria qualquer
+        estratégia sempre com o molde zscore, mesmo que tenha sido testada
+        e aprovada in-sample com uma lógica diferente (veredito de
+        walk-forward sem sentido nenhum).
 
     Gate por fold (RELAXADO): cada fold só precisa de retorno líquido de
     custos positivo (`total_return_r > 0`) e nº de trades >=
@@ -604,6 +617,7 @@ def walk_forward_validate(price_a: pd.Series, price_b: pd.Series, params: dict,
         }
     """
     cfg = {**WALK_FORWARD_CONFIG, **(config or {})}
+    bt_fn = backtest_fn or run_hedge_backtest
 
     n_common = min(len(price_a), len(price_b))
     price_a = price_a.iloc[-n_common:].reset_index(drop=True)
@@ -655,7 +669,7 @@ def walk_forward_validate(price_a: pd.Series, price_b: pd.Series, params: dict,
         combined_b = price_b.iloc[combined_start:combined_end].reset_index(drop=True)
         test_start_local = int(test_idx[0] - combined_start)
 
-        result = run_hedge_backtest(
+        result = bt_fn(
             combined_a, combined_b, params, cost_params=cost_params,
             score_start=test_start_local,
         )

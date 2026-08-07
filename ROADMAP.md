@@ -10,12 +10,18 @@
 | 0.5 | Registo de estratégias (SQLite) | ✅ Feito e testado | `src/strategy_registry.py` |
 | 0.5 | Gerador de estratégias (gera→testa→muta) | ✅ Feito e testado | `src/strategy_generator.py` |
 | 0.5 | Dashboard de validação (UI) | ✅ Feito e testado | `dashboard.py` |
-| 1 | Modelo de ML | ❌ Por fazer | `src/ml_model.py` |
+| 1 | Modelo de ML | ⚠️ Construído e validado 2026-07-29 — infraestrutura completa (triple barrier, walk-forward, LightGBM, 14 símbolos reais), mas **sem edge direcional demonstrado** (accuracy geral 80% vem só de acertar "sem movimento", a accuracy nas raras chamadas de direção é ~10-25%, ao nível do acaso). NÃO ligado ao motor de hedge — seria ruído. | `src/ml_model.py` |
 | 2 | Motor de hedge (produção) | ✅ Feito e testado (25 testes, feed sintético via parquet) | `src/hedge_engine.py` |
 | 3 | Motor de risco (Python) | ✅ Feito e testado | `src/risk_engine.py` |
 | 3 | Motor de risco (MQL5) | ✅ Feito e testado (19/19 RiskGuardTests) | `mql5/RiskGuard.mqh` |
 | 4 | Expert Advisor | ✅ Validado ponta-a-ponta em conta DEMO 2026-07-20 (abriu hedge EURUSD/GBPUSD com SL correto via sinal de teste) | `mql5/ScalpingEA.mq5` |
 | 4 | Ponte de sinais Python->MQL5 | ✅ Feito e testado — SignalBridgeTests 22/22 em MetaEditor (2026-07-20) | `src/signal_bridge.py`, `mql5/SignalBridge.mqh` |
+| 3.5 | Monitor de divergência (ao vivo vs validado) | ✅ Feito e testado 2026-07-30 — regista operações reais, compara com o walk-forward, aciona kill-switch se divergir mal (nunca aumenta risco) | `src/trade_ledger.py`, `src/divergence_monitor.py` |
+| 4 | Alertas (ALERT-01, D-11) | ✅ Feito e testado 2026-07-30 — Telegram + email, kill-switch e drawdown≥80% do limite. **Precisa de configuração tua** (variáveis de ambiente) antes de enviar alguma coisa de verdade | `src/alerts.py` |
+| 0.5 | Motor de descoberta evolutiva (busca ampliada + novas famílias) | ✅ Feito e testado 2026-07-31 — população/torneio/crossover/mutação/elitismo real (não só "mutar os 3 melhores"), 3 famílias novas (kalman, vol_scaled_exit, asymmetric_bands) além do molde zscore, diário de texto (`output/strategy_lab_journal.md`) com motivo de falha dominante por par+tipo | `src/strategy_evolution.py`, `src/strategy_variants.py` |
+| 0.5 | Busca contínua em segundo plano | ✅ Feito e testado 2026-07-31 — loop indefinido (ciclos de busca evolutiva + revalidação walk-forward automática), nunca decide nada sozinho: só populam a base de dados; a elegibilidade continua a exigir os mesmos gates de sempre | `scripts/run_continuous_strategy_search.py` |
+| 2/4 | Troca dinâmica de estratégia em produção (hot-swap) | ✅ Feito e testado 2026-07-31 — `run_hedge_loop()` fixa a estratégia no momento da ENTRADA (nunca troca a meio de um trade aberto) e recarrega `eligible_strategies` periodicamente; `select_strategy_for_pair()` ganhou `policy="best_oos_profit_factor"` (melhor profit factor out-of-sample, não só mais recente). **Critério inegociável**: só promove estratégias que já passam TODOS os gates existentes (in-sample + walk-forward + dados reais) — nunca um candidato ainda em busca | `src/hedge_engine.py`, `scripts/run_live_hedge_loop.py` (`--reload-every-bars`, `--selection-policy`) |
+| 0.5 | Visualização da lógica da estratégia (dashboard) | ✅ Feito e testado 2026-07-31 — z-score do spread com bandas de entrada/saída tracejadas e pontos reais de entrada/saída, por estratégia | `dashboard.py`, `strategy_variants.compute_signal_series_for_type` |
 | - | Backtest walk-forward out-of-sample | ❌ Por fazer | (revalidar estratégias aprovadas em período separado) |
 
 ## Histórico de decisões
@@ -69,6 +75,62 @@
   esta ponte — **nunca compilado nem corrido num terminal MT5 real**,
   precisa de validação em MetaEditor + conta demo antes de qualquer uso
   (ver checklist em "Próximos passos" acima).
+- **2026-07-29**: `src/ml_model.py` (Camada 1) construído seguindo
+  `docs/ml_model_spec.md` à risca: rótulo triple-barrier (verbatim da
+  skill quant-finance-math), LightGBM com `class_weight="balanced"`,
+  walk-forward com `gap=TRIPLE_BARRIER_MAX_BARS` (evita fuga de
+  informação do futuro através da fronteira treino/teste), accuracy
+  condicionada ao regime, simulação de PnL líquida de custos por
+  símbolo. Treinado e validado nos 14 símbolos com dados reais.
+  **Resultado honesto**: sem edge direcional demonstrado — o modelo
+  aprende bem a reconhecer períodos "sem movimento" (~85% dos bars,
+  accuracy geral ~80% incluindo essas previsões), mas quando arrisca
+  prever direção (subida/descida), acerta ao nível do acaso (~10-25%
+  em problemas de 3 classes, esperado ~33%). Infraestrutura completa e
+  testada (95 testes no total do projeto); a camada fica **não-ligada**
+  ao motor de hedge de produção até mostrar edge genuíno — mesma
+  disciplina de "nunca em produção sem validação objetiva" aplicada ao
+  resto do projeto. Não foi um bug — confirmado via matriz de confusão
+  (ver sessão): quando o modelo prevê uma direção, a taxa de acerto e a
+  taxa de erro na direção oposta são aproximadamente iguais (ruído, não
+  inversão sistemática).
+- **2026-07-30**: Monitor de divergência (Camada 3.5) construído —
+  `src/trade_ledger.py` (SQLite, regista abertura/fecho de cada
+  operação REAL com `pnl_r` proxy de perna única) +
+  `src/divergence_monitor.py` (compara janela rolante de trades ao
+  vivo com as estatísticas out-of-sample da estratégia elegível;
+  aciona o kill-switch, nunca aumenta risco, nunca fecha posições
+  existentes, nunca reset automático). Ligado a
+  `scripts/run_live_hedge_loop.py`: cada fecho real regista no ledger
+  e dispara a verificação de divergência. Este é o mecanismo de
+  "readaptação segura" acordado nesta sessão (reduz exposição
+  automaticamente se o desempenho ao vivo divergir mal do validado —
+  nunca o mecanismo de "recuperar perdas" explicitamente recusado).
+  Bug real encontrado e corrigido no processo:
+  `hedge_engine.propose_to_risk_engine()` usava sempre
+  `risk_limits.KILL_SWITCH_PATH` ("KILL_SWITCH.flag", relativo ao cwd
+  do processo Python) para o lado Python do kill-switch — nunca a
+  pasta `Common\Files` real onde o EA (`RiskGuard.mqh`, FILE_COMMON) e
+  agora o monitor de divergência o verificam/criam. Sem esta correção,
+  um kill-switch acionado pelo monitor nunca seria visto pelo lado
+  Python (só pelo MQL5), quebrando a garantia RISK-06/D-09 de
+  verificação independente dos dois lados. Corrigido com um parâmetro
+  `kill_switch_path` explícito em `propose_to_risk_engine()`, vinculado
+  ao caminho real via `functools.partial` no driver ao vivo.
+- **2026-07-30**: Alertas (ALERT-01/D-11) construídos —
+  `src/alerts.py` (Telegram Bot API + email SMTP, configurado só por
+  variáveis de ambiente, nunca hardcoded; qualquer falha de envio é
+  engolida — nunca interrompe o loop de negociação). Ligado a: (1)
+  `divergence_monitor.py` — alerta na transição para kill-switch
+  acionado por divergência; (2) `run_live_hedge_loop.py` — alerta
+  quando o drawdown diário/semanal/absoluto atinge 80% do limite
+  (`RiskLimits.alert_threshold_pct_of_limit`, D-11, já existia como
+  dado exposto desde a Fase 2 à espera desta fase), com histerese
+  simples para não repetir o mesmo alerta enquanto oscila à volta do
+  limiar. **Precisa de configuração do utilizador** (`TELEGRAM_BOT_TOKEN`/
+  `TELEGRAM_CHAT_ID` ou `ALERT_SMTP_*`) antes de enviar alertas reais —
+  sem isso, o sistema continua a funcionar normalmente, só regista um
+  aviso único de "não configurado".
 
 ## Próximos passos (por prioridade sugerida)
 

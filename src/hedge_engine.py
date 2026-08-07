@@ -184,17 +184,50 @@ def load_eligible_strategies(db_path: str) -> list[dict]:
     return eligible_rows
 
 
-def select_strategy_for_pair(eligible: list[dict], pair_a: str, pair_b: str) -> dict | None:
+def _oos_profit_factor(record: dict) -> float | None:
+    """Extrai `aggregate_stats.profit_factor` (out-of-sample, walk-forward)
+    de `record["wf_fold_results"]` — mesmo campo já consumido por
+    `risk_engine.resolve_kelly_inputs()` e por `dashboard.py`. Devolve
+    `None` (nunca levanta exceção) se o campo estiver ausente, malformado,
+    ou sem `aggregate_stats` — o chamador trata `None` como "sem dados
+    para comparar", nunca como zero (que faria um registo sem dados
+    parecer pior do que um com profit_factor genuinamente baixo)."""
+    raw = record.get("wf_fold_results")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(parsed, dict) and parsed.get("aggregate_stats"):
+            return float(parsed["aggregate_stats"]["profit_factor"])
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def select_strategy_for_pair(eligible: list[dict], pair_a: str, pair_b: str,
+                              policy: str = "most_recent") -> dict | None:
     """Resolve qual estratégia elegível propõe ordens para o par exato
     (`pair_a`, `pair_b`) — D-08. v1 não implementa seleção por regime
     (REGIME-01/02 são v2); se mais do que uma estratégia elegível
     partilhar o mesmo par, o desempate é explícito e registado (nunca um
-    `strategies[0]` silencioso): vence a mais recentemente aprovada
-    (maior `created_at`).
+    `strategies[0]` silencioso).
+
+    policy:
+        "most_recent" (default, compatibilidade com o comportamento
+            original) - vence a estratégia com maior `created_at`.
+        "best_oos_profit_factor" - vence a estratégia com maior
+            `aggregate_stats.profit_factor` out-of-sample (ver
+            `_oos_profit_factor`) — usado pela troca dinâmica em
+            produção (scripts/run_live_hedge_loop.py), porque "mais
+            recentemente aprovada" não é o mesmo que "melhor". Um
+            registo sem dados out-of-sample utilizáveis (`None`) nunca
+            vence um registo com dados reais, e cai para o desempate por
+            `created_at` só entre registos igualmente sem dados.
 
     params:
         eligible (list[dict]) - saída de load_eligible_strategies()
         pair_a, pair_b (str)  - símbolos do par exato a resolver
+        policy (str)          - ver acima
 
     devolve:
         dict | None - a estratégia escolhida, ou None se nenhuma estratégia
@@ -206,11 +239,21 @@ def select_strategy_for_pair(eligible: list[dict], pair_a: str, pair_b: str) -> 
     if len(matches) == 1:
         return matches[0]
 
-    chosen = max(matches, key=lambda r: r.get("created_at") or "")
+    if policy == "best_oos_profit_factor":
+        def _key(r: dict) -> tuple[float, str]:
+            pf = _oos_profit_factor(r)
+            # (tem_dados, profit_factor, created_at): registos com dados
+            # out-of-sample ordenam sempre acima dos que não têm, nunca
+            # comparando None com float diretamente.
+            return (pf is not None, pf if pf is not None else float("-inf"), r.get("created_at") or "")
+        chosen = max(matches, key=_key)
+    else:
+        chosen = max(matches, key=lambda r: r.get("created_at") or "")
+
     log.warning(
         "select_strategy_for_pair: %d estratégias elegíveis para %s/%s (ids=%s) — "
-        "desempate por mais recentemente aprovada, escolhida id=%s",
-        len(matches), pair_a, pair_b, [m.get("id") for m in matches], chosen.get("id"),
+        "desempate por policy=%s, escolhida id=%s",
+        len(matches), pair_a, pair_b, [m.get("id") for m in matches], policy, chosen.get("id"),
     )
     return chosen
 
@@ -367,7 +410,8 @@ def recheck_cointegration(price_a: pd.Series, price_b: pd.Series,
 
 def propose_to_risk_engine(hedge_proposal: dict, strategy_record: dict, entry_price: float,
                             stop_distance_price_units: float, account_state, correlation_matrix: dict,
-                            new_position_exposure_pct: float = 0.0) -> RiskDecision:
+                            new_position_exposure_pct: float = 0.0,
+                            kill_switch_path: str | None = None) -> RiskDecision:
     """Traduz uma proposta de hedge (`open_hedge`/`close_hedge` de
     `evaluate_hedge_signal`) para `risk_engine.OrderProposal` e devolve
     a `RiskDecision` de `risk_engine.evaluate_order()` — a autoridade de
@@ -421,7 +465,18 @@ def propose_to_risk_engine(hedge_proposal: dict, strategy_record: dict, entry_pr
         state=account_state,
         limits=RiskLimits(),
         correlation_matrix=correlation_matrix,
-        kill_switch_path=KILL_SWITCH_PATH,
+        # kill_switch_path (bug encontrado 2026-07-30): o default
+        # KILL_SWITCH_PATH ("KILL_SWITCH.flag") é relativo ao cwd do
+        # processo Python, NÃO à pasta Common\Files onde o EA
+        # (RiskGuard.mqh, FILE_COMMON) verifica o mesmo ficheiro. Sem
+        # este parâmetro explícito, um kill-switch criado em
+        # Common\Files (ex.: por divergence_monitor.py) nunca seria
+        # visto pelo lado Python — quebrando a garantia de verificação
+        # independente dos dois lados (RISK-06/D-09). O chamador ao
+        # vivo (scripts/run_live_hedge_loop.py) DEVE passar o caminho
+        # real; o default aqui só existe para não quebrar chamadas
+        # antigas/testes que nunca tocam num kill-switch real.
+        kill_switch_path=kill_switch_path or KILL_SWITCH_PATH,
         new_position_exposure_pct=new_position_exposure_pct,
     )
 
@@ -481,7 +536,8 @@ def replay_feed(feature_parquet_paths: dict[str, str]) -> Iterator[dict[str, "Ba
 
 
 def live_feed(symbols: list[str], timeframe: str, warmup_bars: int = 300,
-              poll_seconds: float = 15.0) -> Iterator[dict[str, "Bar"]]:
+              poll_seconds: float = 15.0,
+              feed_health_path: str | None = None) -> Iterator[dict[str, "Bar"]]:
     """Gera a mesma forma que `replay_feed()` (`dict[str, Bar]` por
     passo) mas a partir do terminal MT5 ao vivo — `run_hedge_loop()`
     nunca sabe qual dos dois está a consumir (Pitfall 5).
@@ -502,16 +558,35 @@ def live_feed(symbols: list[str], timeframe: str, warmup_bars: int = 300,
     processo que consome este gerador tem de ser terminado (Ctrl+C ou
     equivalente), não há um sinal de paragem embutido aqui.
 
+    RECONEXÃO (D-14, pedido explícito do utilizador — sem Telegram/email,
+    só log + ficheiro de estado para o dashboard): uma falha genuína de
+    fetch (`rates is None`, distinta de "barra ainda não fechou", que é
+    normal e não conta como falha) incrementa um contador de falhas
+    consecutivas e grava o estado em `feed_health_path` via
+    `feed_health.write_feed_health()` — NUNCA desiste, tenta para sempre
+    a cada `poll_seconds`. A cada `RECONNECT_ATTEMPT_EVERY_N_FAILURES`
+    falhas consecutivas, chama `mt5.initialize()` de novo (idempotente,
+    seguro chamar mesmo já inicializado) — sem isto, uma quebra que
+    invalidasse a sessão IPC local (não só a ligação da corretora, que o
+    terminal já trata sozinho) nunca recuperaria sozinha.
+
     params:
         symbols       (list[str]) - símbolos a subscrever (nomes exatos da corretora)
         timeframe     (str)       - "M1"/"M5"/etc., mapeado para MT5 via TIMEFRAME_<tf>
         warmup_bars   (int)       - nº de barras históricas fechadas para aquecimento
         poll_seconds  (float)     - intervalo de sondagem por novo fecho de barra
+        feed_health_path (str | None) - caminho do ficheiro de estado (ver
+            feed_health.py); default None usa feed_health.DEFAULT_HEALTH_PATH
 
     produz:
         dict[str, Bar] - um passo por timestamp de fecho comum a todos os símbolos
     """
     import time as _time
+
+    from src.feed_health import DEFAULT_HEALTH_PATH, write_feed_health
+
+    health_path = feed_health_path or DEFAULT_HEALTH_PATH
+    RECONNECT_ATTEMPT_EVERY_N_FAILURES = 3
 
     import MetaTrader5 as mt5  # import local: só exigido neste modo, mesmo padrão de data_pipeline.py
 
@@ -526,6 +601,17 @@ def live_feed(symbols: list[str], timeframe: str, warmup_bars: int = 300,
 
     tf_const = getattr(mt5, f"TIMEFRAME_{timeframe}")
 
+    # symbol_select() força o símbolo a aparecer no Market Watch e o terminal
+    # a começar a atualizá-lo — sem isto, um símbolo que não esteja já num
+    # gráfico/Market Watch pode devolver histórico desatualizado (cache
+    # antiga, não sincronizada com o instante atual), o que faz a
+    # intersecção de timestamps com um símbolo ATIVO (ex.: o que está no
+    # gráfico do EA) ficar vazia — bug confirmado em teste manual 2026-07-29
+    # (aquecimento com "0 barras" mesmo sem nenhuma exceção levantada).
+    for sym in symbols:
+        if not mt5.symbol_select(sym, True):
+            log.warning("live_feed: symbol_select(%s) falhou — %s", sym, mt5.last_error())
+
     warmup_series: dict[str, pd.Series] = {}
     for sym in symbols:
         rates = mt5.copy_rates_from_pos(sym, tf_const, 1, warmup_bars)
@@ -533,11 +619,20 @@ def live_feed(symbols: list[str], timeframe: str, warmup_bars: int = 300,
             raise RuntimeError(f"live_feed: sem barras de aquecimento para {sym} — {mt5.last_error()}")
         idx = pd.to_datetime(pd.DataFrame(rates)["time"], unit="s")
         warmup_series[sym] = pd.Series(pd.DataFrame(rates)["close"].values, index=idx)
+        log.info("live_feed: %s aquecimento %d barras, %s -> %s",
+                 sym, len(idx), idx.iloc[0], idx.iloc[-1])
 
     common_idx = None
     for s in warmup_series.values():
         common_idx = s.index if common_idx is None else common_idx.intersection(s.index)
     common_idx = common_idx.sort_values() if common_idx is not None else pd.DatetimeIndex([])
+
+    if len(common_idx) == 0:
+        raise RuntimeError(
+            "live_feed: intersecção de timestamps entre símbolos ficou vazia (aquecimento "
+            "inútil) — ver as linhas de log acima com o intervalo de datas de cada símbolo "
+            "para perceber qual está dessincronizado."
+        )
 
     last_ts: dict[str, pd.Timestamp] = {}
     for ts in common_idx:
@@ -549,24 +644,68 @@ def live_feed(symbols: list[str], timeframe: str, warmup_bars: int = 300,
     log.info("live_feed: aquecimento concluído (%d barras) — a entrar em polling ao vivo (%.0fs)",
              len(common_idx), poll_seconds)
 
+    consecutive_failures = 0
+
     while True:
         _time.sleep(poll_seconds)
 
         candidate_bars: dict[str, Bar] = {}
         all_ready = True
+        fetch_failed = False
+        last_error_msg: str | None = None
         for sym in symbols:
             rates = mt5.copy_rates_from_pos(sym, tf_const, 1, 1)
             if rates is None or len(rates) == 0:
-                log.warning("live_feed: sem dados para %s neste ciclo de polling — a tentar de novo", sym)
+                # Reativa a subscrição do símbolo (bug encontrado em teste
+                # manual 2026-07-29): um símbolo pode "cair" da lista ativa
+                # da corretora a meio de uma corrida longa (ex.: instabilidade
+                # de rede), e symbol_select() só era chamado uma vez no
+                # arranque — sem repetir aqui, o símbolo nunca mais voltava a
+                # dar dados, obrigando a reiniciar o processo inteiro.
+                mt5.symbol_select(sym, True)
+                last_error_msg = str(mt5.last_error())
+                log.warning("live_feed: sem dados para %s neste ciclo de polling (falha consecutiva "
+                            "nº %d) — symbol_select() repetido, a tentar de novo: %s",
+                            sym, consecutive_failures + 1, last_error_msg)
                 all_ready = False
+                fetch_failed = True
                 break
             ts = pd.to_datetime(rates[0]["time"], unit="s")
             if ts <= last_ts.get(sym, pd.Timestamp.min):
-                all_ready = False  # este símbolo ainda não fechou uma barra nova
+                all_ready = False  # este símbolo ainda não fechou uma barra nova (normal, não é falha)
                 break
             candidate_bars[sym] = Bar(timestamp=ts, symbol=sym, close=float(rates[0]["close"]))
+
+        if fetch_failed:
+            # Falha GENUÍNA de fetch (distinta de "barra ainda não fechou"
+            # acima) — nunca desiste, tenta para sempre a cada poll_seconds
+            # (pedido explícito: reconexão indefinida, ilimitada). A cada
+            # RECONNECT_ATTEMPT_EVERY_N_FAILURES falhas seguidas, tenta
+            # reinicializar a sessão MT5 (idempotente) — sem isto, uma
+            # quebra que invalidasse a ligação IPC local (não só a ligação
+            # da corretora, que o terminal já trata sozinho) nunca
+            # recuperaria sozinha, mesmo com symbol_select() repetido.
+            consecutive_failures += 1
+            write_feed_health("degraded", consecutive_failures, last_error_msg, path=health_path)
+            if consecutive_failures % RECONNECT_ATTEMPT_EVERY_N_FAILURES == 0:
+                log.warning(
+                    "live_feed: %d falhas consecutivas — a tentar reinicializar a ligação MT5 "
+                    "(mt5.initialize()); as tentativas continuam indefinidamente, sem limite.",
+                    consecutive_failures,
+                )
+                mt5.initialize()
+            continue
+
         if not all_ready:
             continue
+
+        if consecutive_failures > 0:
+            log.info(
+                "live_feed: dados a chegar de novo após %d falha(s) consecutiva(s) — ligação recuperada.",
+                consecutive_failures,
+            )
+            consecutive_failures = 0
+        write_feed_health("ok", 0, path=health_path)
 
         distinct_timestamps = {bar.timestamp for bar in candidate_bars.values()}
         if len(distinct_timestamps) != 1:
@@ -590,7 +729,8 @@ def run_hedge_loop(feed: Iterator[dict[str, "Bar"]], eligible_strategies: list[d
                     coint_recheck_every: int = COINT_RECHECK_EVERY_BARS,
                     beta_window: int = 100, corr_window: int = 100, recalc_every: int = 50,
                     account_state_provider=None, correlation_matrix: dict | None = None,
-                    on_event=None) -> list[dict]:
+                    on_event=None, selection_policy: str = "most_recent",
+                    reload_eligible_fn=None, reload_every_bars: int = 50) -> list[dict]:
     """Consome qualquer iterador de feed (replay hoje, ao vivo no
     futuro — corpo do loop idêntico, sem bifurcação backtest/live,
     Pitfall 5) e devolve a lista de eventos processados (propostas
@@ -646,6 +786,22 @@ def run_hedge_loop(feed: Iterator[dict[str, "Bar"]], eligible_strategies: list[d
             evento-a-evento em vez de esperar o batch completo devolvido no fim. Nunca afeta o valor
             de retorno (a lista `events` continua a acumular tudo, igual a antes); None (default)
             preserva o comportamento anterior exatamente.
+        selection_policy        (str)                        - repassado a select_strategy_for_pair()
+            (ver hedge_engine.select_strategy_for_pair). Default "most_recent" preserva o
+            comportamento pré-existente.
+        reload_eligible_fn      (callable | None)            - () -> list[dict], mesma forma de
+            load_eligible_strategies(). Quando None (default), `eligible_strategies` nunca muda
+            depois do arranque — comportamento idêntico ao pré-existente. Quando fornecido, a cada
+            `reload_every_bars` barras é chamado para obter uma lista fresca (permite a um driver ao
+            vivo, ex. scripts/run_live_hedge_loop.py, promover automaticamente estratégias recém-
+            validadas sem reiniciar o processo). Pares novos ganham estado vazio (nunca reinicia
+            estado de um par já a ser seguido). CRÍTICO (CLAUDE.md regra 7): uma posição já aberta
+            NUNCA troca de estratégia a meio do trade — o par (strategy_record, pair_params) é
+            fixado no momento da abertura (guardado em `positions[key]`) e reusado para toda decisão
+            de SAÍDA dessa posição, mesmo que `eligible_strategies` mude entretanto; só a próxima
+            ENTRADA (posição fechada) é que resolve de novo com a lista atualizada.
+        reload_every_bars       (int)                        - cadência (em barras) da recarga acima;
+            ignorado se reload_eligible_fn for None.
 
     devolve:
         list[dict] - um registo por evento processado:
@@ -708,12 +864,25 @@ def run_hedge_loop(feed: Iterator[dict[str, "Bar"]], eligible_strategies: list[d
             # genérico (ver nota CLAUDE.md regra 7 na docstring desta
             # função). Um par sem parâmetros válidos é ignorado neste
             # bar, fail-closed.
-            strategy_record = select_strategy_for_pair(eligible_strategies, pair_a, pair_b)
-            if strategy_record is None:
-                continue
-            pair_params = _hedge_params_from_strategy_record(strategy_record)
-            if pair_params is None:
-                continue
+            #
+            # Com posição ABERTA, a estratégia usada é a que foi FIXADA no
+            # momento da entrada (position["strategy_record"]/["pair_params"]),
+            # nunca re-resolvida — sem isto, uma recarga de
+            # eligible_strategies (reload_eligible_fn) a meio de um trade
+            # trocaria os limiares de SAÍDA por outros nunca testados juntos
+            # com a entrada que os originou, violando CLAUDE.md regra 7.
+            if position is None:
+                strategy_record = select_strategy_for_pair(
+                    eligible_strategies, pair_a, pair_b, policy=selection_policy,
+                )
+                if strategy_record is None:
+                    continue
+                pair_params = _hedge_params_from_strategy_record(strategy_record)
+                if pair_params is None:
+                    continue
+            else:
+                strategy_record = position["strategy_record"]
+                pair_params = position["pair_params"]
 
             # Reteste de cointegração: sempre antes de uma decisão de
             # entrada, e a cada coint_recheck_every barras para posição aberta.
@@ -774,19 +943,63 @@ def run_hedge_loop(feed: Iterator[dict[str, "Bar"]], eligible_strategies: list[d
                     ]
                     event["new_position_exposure_pct"] = decision.size_lots
                     event["aggregate_exposure_pct_after"] = aggregate_exposure_pct(projected, corr_matrix)
-                    positions[key] = {"direction": signal["direction"], "entry_bar": bar_index}
+                    positions[key] = {
+                        "direction": signal["direction"], "entry_bar": bar_index,
+                        # Fixados no momento da entrada — ver nota acima e na
+                        # docstring de reload_eligible_fn (CLAUDE.md regra 7).
+                        "strategy_record": strategy_record, "pair_params": pair_params,
+                    }
                     bars_held[key] = 0
                 events.append(event)
                 if on_event is not None:
                     on_event(event)
             else:  # close_hedge — autoridade própria do módulo, não passa pelo motor de risco
                 close_event = {"bar_index": bar_index, "pair_a": pair_a, "pair_b": pair_b,
-                               "proposal": signal, "risk_decision": None}
+                               "proposal": signal, "risk_decision": None,
+                               # Consumido por src/trade_ledger.py (via on_event) para calcular
+                               # pnl_r — nunca recalculado a partir de outra fonte de preço.
+                               "exit_price_a": float(series_a.iloc[-1]),
+                               # id da estratégia FIXADA na entrada deste trade (position,
+                               # ainda não sobrescrita nesta linha) — permite a um chamador ao
+                               # vivo (scripts/run_live_hedge_loop.py) ir buscar a baseline
+                               # out-of-sample EXATA desta estratégia, mesmo que
+                               # eligible_strategies já tenha mudado (reload_eligible_fn)
+                               # entre a abertura e o fecho deste trade.
+                               "strategy_id": position["strategy_record"].get("id")}
                 events.append(close_event)
                 if on_event is not None:
                     on_event(close_event)
                 positions[key] = None
                 bars_held[key] = 0
+
+        # Recarga periódica de eligible_strategies (opt-in — ver docstring).
+        # Corre DEPOIS do loop de pares deste bar (nunca muta `pairs` a meio
+        # da iteração de cima) e ANTES de avançar para o próximo bar.
+        if reload_eligible_fn is not None and bar_index > 0 and bar_index % reload_every_bars == 0:
+            new_eligible = reload_eligible_fn()
+            new_pairs = sorted({(s["pair_a"], s["pair_b"]) for s in new_eligible})
+            for p in new_pairs:
+                if p not in positions:
+                    positions[p] = None
+                    bars_held[p] = 0
+                    bars_since_coint_check[p] = coint_recheck_every
+                    last_coint_result[p] = False
+                    pairs.append(p)
+                    log.info("run_hedge_loop: novo par elegível detetado na recarga (bar %d): %s/%s",
+                             bar_index, p[0], p[1])
+            for p in pairs:
+                if positions[p] is not None:
+                    continue  # posição aberta -> fixada, nunca troca a meio do trade (ver acima)
+                old_record = select_strategy_for_pair(eligible_strategies, p[0], p[1], policy=selection_policy)
+                new_record = select_strategy_for_pair(new_eligible, p[0], p[1], policy=selection_policy)
+                old_id = old_record.get("id") if old_record else None
+                new_id = new_record.get("id") if new_record else None
+                if old_id != new_id:
+                    log.info(
+                        "run_hedge_loop: troca de estratégia para %s/%s na recarga (bar %d): %s -> %s",
+                        p[0], p[1], bar_index, old_id, new_id,
+                    )
+            eligible_strategies = new_eligible
 
         bar_index += 1
 

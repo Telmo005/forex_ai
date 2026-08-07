@@ -99,6 +99,26 @@ def migrate_add_walk_forward_columns(db_path: str) -> None:
     conn.close()
 
 
+def migrate_add_strategy_type_column(db_path: str) -> None:
+    """Migração aditiva e idempotente: adiciona `strategy_type` a uma base
+    de dados já existente (criada antes de src/strategy_variants.py).
+    Mesmo padrão de migrate_add_cost_columns/migrate_add_walk_forward_columns
+    (PRAGMA table_info + ALTER TABLE condicional, porque sqlite3 não
+    suporta `ADD COLUMN IF NOT EXISTS`).
+
+    Linhas antigas ficam com `strategy_type` NULL — consumidores (ex.
+    strategy_variants.run_backtest_for_type, revalidate_walk_forward.py)
+    tratam NULL/ausente como `"zscore"` (o único molde que existia antes
+    desta coluna), nunca inferem outra coisa.
+    """
+    conn = sqlite3.connect(db_path)
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(strategies)")}
+    if "strategy_type" not in existing_cols:
+        conn.execute("ALTER TABLE strategies ADD COLUMN strategy_type TEXT")
+    conn.commit()
+    conn.close()
+
+
 def init_db(db_path: str) -> None:
     parent = os.path.dirname(db_path)
     if parent:
@@ -109,6 +129,7 @@ def init_db(db_path: str) -> None:
     conn.close()
     migrate_add_cost_columns(db_path)
     migrate_add_walk_forward_columns(db_path)
+    migrate_add_strategy_type_column(db_path)
 
 
 def save_strategy(db_path: str, record: dict) -> None:
@@ -119,8 +140,9 @@ def save_strategy(db_path: str, record: dict) -> None:
             id, created_at, pair_a, pair_b, params, status, fail_reasons,
             generation, parent_id, total_trades, win_rate, profit_factor,
             sharpe_per_trade, total_return_r, max_drawdown_r, avg_hold_bars,
-            avg_win_r, avg_loss_r, bars_tested, trades, cost_model_version
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            avg_win_r, avg_loss_r, bars_tested, trades, cost_model_version,
+            strategy_type
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             record["id"], record["created_at"], record["pair_a"], record["pair_b"],
@@ -129,7 +151,7 @@ def save_strategy(db_path: str, record: dict) -> None:
             record["profit_factor"], record["sharpe_per_trade"], record["total_return_r"],
             record["max_drawdown_r"], record["avg_hold_bars"], record["avg_win_r"],
             record["avg_loss_r"], record["bars_tested"], json.dumps(record["trades"]),
-            record["cost_model_version"],
+            record["cost_model_version"], record.get("strategy_type", "zscore"),
         ),
     )
     conn.commit()

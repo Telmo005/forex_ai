@@ -14,16 +14,60 @@ Uso:
 import json
 import os
 import sys
+import time
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+# hedge_engine.py (ao contrário de backtest_engine/strategy_registry/
+# trade_ledger, que usam imports bare) importa os seus próprios módulos
+# irmãos como `from src.backtest_engine import ...` — precisa da RAIZ do
+# repo também no sys.path (não só src/) para "src" resolver como pacote.
+sys.path.insert(0, REPO_ROOT)
 from backtest_engine import PROFIT_FACTOR_NO_LOSSES_SENTINEL  # noqa: E402
+from feed_health import read_feed_health  # noqa: E402
+from hedge_engine import load_eligible_strategies  # noqa: E402
+from process_control import get_pid, is_running, start_process, stop_process  # noqa: E402
 from strategy_registry import init_db, list_strategies  # noqa: E402
+from trade_ledger import list_all_trades  # noqa: E402
 
 st.set_page_config(page_title="Forex AI — Strategy Lab", layout="wide", page_icon="🔬")
+
+# ---------------------------------------------------------------------
+# Gate de password — ANTES de qualquer outra coisa correr (nenhum dado é
+# carregado, nenhuma query à base de dados é feita, antes de autenticar).
+# Password vem de DASHBOARD_PASSWORD (variável de ambiente, nunca
+# hardcoded no ficheiro nem escrita em disco — mesma disciplina de
+# CLAUDE.md "Credenciais - NUNCA versionar" para .env/*credentials*).
+# Sem essa variável definida, o dashboard continua a funcionar (não
+# bloqueia quem só o usa localmente), mas mostra um aviso persistente —
+# nunca falha silenciosamente para "sem proteção" sem o utilizador saber.
+# ---------------------------------------------------------------------
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD")
+
+if DASHBOARD_PASSWORD:
+    if not st.session_state.get("authenticated", False):
+        st.title("🔒 Forex AI — Strategy Lab")
+        st.caption("Este dashboard está protegido por password (DASHBOARD_PASSWORD).")
+        with st.form("login_form"):
+            pwd_input = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Entrar")
+        if submitted:
+            if pwd_input == DASHBOARD_PASSWORD:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Password incorreta.")
+        st.stop()
+else:
+    st.warning(
+        "⚠️ DASHBOARD_PASSWORD não está definida — este dashboard está a correr SEM proteção "
+        "por password. Define a variável de ambiente antes de expor isto fora da tua própria "
+        "máquina (ex.: numa VPS) — `iniciar_dashboard.bat` já pergunta por ela."
+    )
 
 DB_PATH = os.environ.get("STRATEGY_DB", os.path.join("output", "strategy_lab.db"))
 
@@ -53,7 +97,258 @@ st.caption(
     "não existe nenhuma vista sem custos.**"
 )
 
+# ---------------------------------------------------------------------
+# 🎛️ Painel de controlo — arranca/para os processos de longa duração a
+# partir de um clique, em vez de exigir comandos de terminal. Cada botão
+# abre a SUA PRÓPRIA janela de consola (process_control.start_process) —
+# visível, com logs ao vivo — nunca corre nada escondido nem de forma
+# bloqueante dentro do próprio dashboard.
+# ---------------------------------------------------------------------
+st.subheader("🎛️ Painel de controlo")
+
+CTRL_DATA_PIPELINE = "data_pipeline"
+CTRL_CONTINUOUS_SEARCH = "continuous_search"
+CTRL_LIVE_LOOP = "live_loop"
+
+ctrl1, ctrl2, ctrl3 = st.columns(3)
+
+with ctrl1:
+    with st.container(border=True):
+        st.markdown("**🔄 Atualizar dados do MT5**")
+        st.caption("Corre `data_pipeline.py --mode mt5` — busca preços novos e recalcula pares cointegrados.")
+        st.warning("⚠️ Confirma que o terminal MT5 já está aberto e com sessão iniciada antes de clicares.")
+        if is_running(CTRL_DATA_PIPELINE):
+            st.success(f"🟢 A correr (PID {get_pid(CTRL_DATA_PIPELINE)})")
+            if st.button("⏹ Parar", key="stop_data_pipeline"):
+                stop_process(CTRL_DATA_PIPELINE)
+                st.rerun()
+        else:
+            if st.button("▶️ Atualizar agora", key="start_data_pipeline"):
+                start_process(
+                    CTRL_DATA_PIPELINE,
+                    [sys.executable, os.path.join("src", "data_pipeline.py"), "--mode", "mt5"],
+                    cwd=REPO_ROOT,
+                )
+                st.rerun()
+
+with ctrl2:
+    with st.container(border=True):
+        st.markdown("**🧬 Busca contínua de estratégias**")
+        st.caption(
+            "Corre `run_continuous_strategy_search.py` — gera, testa e revalida estratégias sem "
+            "parar, e agora também atualiza os dados do MT5 sozinha (a cada hora) — nunca fica "
+            "presa a olhar sempre para os mesmos pares."
+        )
+        st.warning("⚠️ Por causa da atualização automática, precisa do terminal MT5 aberto e com sessão iniciada.")
+        if is_running(CTRL_CONTINUOUS_SEARCH):
+            st.success(f"🟢 A correr (PID {get_pid(CTRL_CONTINUOUS_SEARCH)})")
+            if st.button("⏹ Parar", key="stop_continuous_search"):
+                stop_process(CTRL_CONTINUOUS_SEARCH)
+                st.rerun()
+        else:
+            if st.button("▶️ Iniciar busca contínua", key="start_continuous_search"):
+                start_process(
+                    CTRL_CONTINUOUS_SEARCH,
+                    [sys.executable, os.path.join("scripts", "run_continuous_strategy_search.py"),
+                     "--confirm-real-data", "--auto-refresh-mt5"],
+                    cwd=REPO_ROOT,
+                )
+                st.rerun()
+
+with ctrl3:
+    with st.container(border=True):
+        st.markdown("**📡 Ligar ao MT5 ao vivo**")
+        st.caption("Corre `run_live_hedge_loop.py` — negoceia (demo/real) com as estratégias já elegíveis.")
+        st.warning("⚠️ Precisa do terminal MT5 aberto E do Expert Advisor já anexado a um gráfico.")
+
+        n_eligible = len(load_eligible_strategies(DB_PATH)) if os.path.exists(DB_PATH) else 0
+
+        if is_running(CTRL_LIVE_LOOP):
+            st.success(f"🟢 A correr (PID {get_pid(CTRL_LIVE_LOOP)})")
+
+            # 🔌 Saúde da ligação MT5 (hedge_engine.live_feed) — lido do
+            # ficheiro que o próprio loop vai atualizando a cada ciclo de
+            # polling (src/feed_health.py). Reconexão é sempre tentada
+            # indefinidamente do lado do processo; isto é só o alerta
+            # visual pedido (sem Telegram/email).
+            health = read_feed_health()
+            if health is None:
+                st.caption("🔌 Ligação MT5: ainda sem dados de saúde (a aguardar o primeiro ciclo).")
+            elif health["status"] == "ok":
+                st.caption(f"🔌 Ligação MT5: 🟢 OK (última confirmação: {health['updated_at']})")
+            else:
+                st.error(
+                    f"🔌 Ligação MT5: 🔴 {health['consecutive_failures']} falha(s) consecutiva(s) — "
+                    f"a tentar reconectar automaticamente, sem limite de tentativas. "
+                    f"Último erro: {health.get('last_error') or 'n/a'}"
+                )
+
+            if st.button("⏹ Parar", key="stop_live_loop"):
+                stop_process(CTRL_LIVE_LOOP)
+                st.rerun()
+        elif n_eligible == 0:
+            st.error(
+                "🔒 Sem estratégias elegíveis (0) — nada para negociar. "
+                "A busca contínua tem de encontrar e validar pelo menos uma primeiro."
+            )
+            st.button("▶️ Ligar ao vivo", key="start_live_loop_disabled", disabled=True)
+        else:
+            st.info(f"{n_eligible} estratégia(s) elegível(is) — pronta(s) a negociar.")
+            confirm_demo = st.checkbox("Confirmo que esta é uma conta DEMO", key="confirm_demo_account")
+            if st.button("▶️ Ligar ao vivo", key="start_live_loop", disabled=not confirm_demo):
+                start_process(
+                    CTRL_LIVE_LOOP,
+                    [sys.executable, os.path.join("scripts", "run_live_hedge_loop.py"),
+                     "--reload-every-bars", "50", "--selection-policy", "best_oos_profit_factor"],
+                    cwd=REPO_ROOT,
+                )
+                st.rerun()
+
+st.divider()
+
 df = load(DB_PATH)
+
+# ---------------------------------------------------------------------
+# Painel "Ao vivo" — confirma visualmente que uma busca em segundo plano
+# (scripts/run_continuous_strategy_search.py ou strategy_generator.py
+# --evolutionary) está mesmo a processar, sem precisar de olhar para o
+# terminal: última atividade, ritmo recente, % de aprovadas e total de
+# trades ganhos/perdidos numa janela recente. Nunca decide nada — é só
+# leitura do mesmo `df` já carregado (Don't Hand-Roll).
+# ---------------------------------------------------------------------
+RECENT_WINDOW_MINUTES = 5
+
+live_left, live_right = st.columns([1, 3])
+with live_left:
+    auto_refresh = st.checkbox(
+        "🔄 Atualizar automaticamente (5s)", value=False, key="live_autorefresh",
+        help="Liga isto enquanto uma busca estiver a correr em segundo plano, para veres "
+             "as estratégias a aparecer em tempo real.",
+    )
+with live_right:
+    st.caption(
+        "Painel ao vivo — confirma se `run_continuous_strategy_search.py` (ou "
+        "`strategy_generator.py --evolutionary`) está mesmo a testar estratégias agora."
+    )
+
+with st.container(border=True):
+    if df.empty:
+        st.info("⚪ Sem dados ainda — nenhuma estratégia foi testada nesta base de dados.")
+    else:
+        created = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
+        now = pd.Timestamp.now(tz="UTC")
+        last_created = created.max()
+        seconds_since_last = (now - last_created).total_seconds() if pd.notna(last_created) else None
+
+        recent_mask = created >= (now - pd.Timedelta(minutes=RECENT_WINDOW_MINUTES))
+        df_recent = df[recent_mask]
+        n_recent = len(df_recent)
+        n_recent_passed = int((df_recent["status"] == "passed").sum()) if n_recent else 0
+        pct_recent = (n_recent_passed / n_recent * 100) if n_recent else 0.0
+        # win/loss de TRADES (não de estratégias) agregados na janela recente —
+        # win_rate * total_trades arredondado dá o nº de trades ganhos por
+        # estratégia (mesma reconstrução que compute_stats já garante ser
+        # consistente internamente, nunca recalculado do zero aqui).
+        wins_per_row = (df_recent["win_rate"] * df_recent["total_trades"]).round() if n_recent else pd.Series(dtype=float)
+        wins_recent = int(wins_per_row.sum()) if n_recent else 0
+        losses_recent = int((df_recent["total_trades"].sum() - wins_recent)) if n_recent else 0
+
+        status_col, m1, m2, m3, m4 = st.columns([1.3, 1, 1, 1, 1])
+        with status_col:
+            if seconds_since_last is None:
+                st.info("⚪ Sem dados ainda")
+            elif seconds_since_last < 120:
+                st.success(f"🟢 A processar — última há {int(seconds_since_last)}s")
+            elif seconds_since_last < 600:
+                st.warning(f"🟡 Sem atividade há {int(seconds_since_last / 60)} min")
+            else:
+                st.error(f"🔴 Parado — última atividade há {int(seconds_since_last / 60)} min")
+        m1.metric(f"Testadas (últimos {RECENT_WINDOW_MINUTES} min)", n_recent)
+        m2.metric("% aprovadas (recente)", f"{pct_recent:.1f}%")
+        m3.metric("Trades ganhos (recente)", wins_recent)
+        m4.metric("Trades perdidos (recente)", losses_recent)
+
+        st.caption("Últimas estratégias testadas (mais recente primeiro):")
+        last_n = df.sort_values("created_at", ascending=False).head(15).copy()
+        if "strategy_type" not in last_n.columns:
+            last_n["strategy_type"] = None
+        last_n["strategy_type"] = last_n["strategy_type"].fillna("zscore")
+        last_n["status"] = last_n["status"].map({"passed": "✅", "failed": "❌"})
+        st.dataframe(
+            last_n[[
+                "created_at", "pair_a", "pair_b", "strategy_type", "generation",
+                "status", "total_trades", "win_rate", "profit_factor",
+            ]].rename(columns={
+                "created_at": "Quando", "pair_a": "Par A", "pair_b": "Par B",
+                "strategy_type": "Tipo", "generation": "Geração", "status": "Estado",
+                "total_trades": "Nº trades", "win_rate": "Win rate", "profit_factor": "Profit factor",
+            }),
+            use_container_width=True, hide_index=True, height=280,
+        )
+
+# ---------------------------------------------------------------------
+# Operações reais — output/live_trades.db (src/trade_ledger.py), gravado
+# só quando scripts/run_live_hedge_loop.py está de facto a correr contra
+# o MT5. Distinto de tudo acima (que é só o LABORATÓRIO — candidatos
+# testados no histórico); isto é o que realmente aconteceu na conta.
+# ---------------------------------------------------------------------
+st.divider()
+st.subheader("📈 Operações (conta ao vivo/demo)")
+
+ledger_db_path = os.path.join(os.path.dirname(DB_PATH) or "output", "live_trades.db")
+trades_live = list_all_trades(ledger_db_path)
+
+if not trades_live:
+    st.info(
+        f"Ainda não há nenhuma operação registada em `{ledger_db_path}`. Isto só passa a "
+        "ter dados depois de `python scripts/run_live_hedge_loop.py` estar a correr com o "
+        "MT5 ligado — enquanto isso não acontecer, é normal e esperado estar vazio."
+    )
+else:
+    trades_df_live = pd.DataFrame(trades_live)
+    open_trades = trades_df_live[trades_df_live["status"] == "open"]
+    closed_trades = trades_df_live[trades_df_live["status"] == "closed"]
+
+    oc1, oc2, oc3, oc4 = st.columns(4)
+    oc1.metric("Posições abertas agora", len(open_trades))
+    oc2.metric("Operações fechadas (histórico)", len(closed_trades))
+    if len(closed_trades):
+        oc3.metric("Win rate (real)", f"{(closed_trades['pnl_r'] > 0).mean():.1%}")
+        oc4.metric("PnL total (R, proxy 1 perna)", f"{closed_trades['pnl_r'].sum():.2f}")
+    else:
+        oc3.metric("Win rate (real)", "n/a")
+        oc4.metric("PnL total (R, proxy 1 perna)", "n/a")
+
+    if len(open_trades):
+        st.markdown("**Posições abertas agora:**")
+        open_display = open_trades[["pair_a", "pair_b", "direction", "entry_timestamp", "entry_price_a"]].copy()
+        open_display["direction"] = open_display["direction"].map({1: "Long spread", -1: "Short spread"})
+        st.dataframe(
+            open_display.rename(columns={
+                "pair_a": "Par A", "pair_b": "Par B", "direction": "Direção",
+                "entry_timestamp": "Entrada em", "entry_price_a": "Preço entrada (perna A)",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
+    if len(closed_trades):
+        st.markdown("**Últimas operações fechadas:**")
+        closed_display = closed_trades.head(20)[[
+            "pair_a", "pair_b", "direction", "entry_timestamp", "exit_timestamp", "exit_reason", "pnl_r",
+        ]].copy()
+        closed_display["direction"] = closed_display["direction"].map({1: "Long spread", -1: "Short spread"})
+        st.dataframe(
+            closed_display.rename(columns={
+                "pair_a": "Par A", "pair_b": "Par B", "direction": "Direção",
+                "entry_timestamp": "Entrada em", "exit_timestamp": "Saída em",
+                "exit_reason": "Motivo de saída", "pnl_r": "PnL (R)",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
+if auto_refresh:
+    time.sleep(5)
+    st.rerun()
 
 if df.empty:
     st.warning(
@@ -202,6 +497,115 @@ with detail_right:
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Esta estratégia não gerou nenhum trade no período testado — provavelmente os limiares são restritivos demais para este par.")
+
+# ---------------------------------------------------------------------
+# Lógica da estratégia — z-score + bandas de entrada/saída + pontos reais
+# ---------------------------------------------------------------------
+st.divider()
+st.markdown(
+    "**Lógica da estratégia** — z-score do spread ao longo do tempo, com as bandas de "
+    "entrada/saída e os pontos reais de entrada/saída desta estratégia:"
+)
+
+output_dir = os.path.dirname(DB_PATH) or "output"
+price_path_a = os.path.join(output_dir, f"features_{row['pair_a']}.parquet")
+price_path_b = os.path.join(output_dir, f"features_{row['pair_b']}.parquet")
+
+if not (os.path.exists(price_path_a) and os.path.exists(price_path_b)):
+    st.info(
+        f"Não encontrei `{price_path_a}` / `{price_path_b}` — corre `python src/data_pipeline.py` "
+        "para os gerar antes de veres a lógica desta estratégia."
+    )
+else:
+    from strategy_variants import compute_signal_series_for_type  # noqa: E402
+
+    raw_strategy_type = row.get("strategy_type")
+    strategy_type = "zscore" if pd.isna(raw_strategy_type) else raw_strategy_type
+    params = json.loads(row["params"])
+
+    try:
+        price_a_series = pd.read_parquet(price_path_a)["close"]
+        price_b_series = pd.read_parquet(price_path_b)["close"]
+        series = compute_signal_series_for_type(strategy_type, price_a_series, price_b_series, params)
+    except Exception as exc:
+        st.warning(f"Não consegui recalcular a série de sinal desta estratégia ({strategy_type}): {exc}")
+        series = None
+
+    if series is not None:
+        zscore = series["zscore"]
+        n_common = len(zscore)
+
+        logic_fig = go.Figure()
+        logic_fig.add_trace(go.Scatter(
+            y=zscore, mode="lines", name="Z-score do spread",
+            line=dict(color="#1f77b4", width=1),
+        ))
+
+        # Bandas tracejadas — asymmetric_bands tem limiares distintos por
+        # lado (entry_threshold_long/entry_threshold_short); as restantes
+        # variantes são simétricas à volta de zero (entry_threshold único).
+        if "entry_threshold_long" in params or "entry_threshold_short" in params:
+            entry_short = params.get("entry_threshold_short")
+            entry_long = params.get("entry_threshold_long")
+            if entry_short is not None:
+                logic_fig.add_hline(y=entry_short, line_dash="dash", line_color="#d62728",
+                                     annotation_text="entrada (short)")
+            if entry_long is not None:
+                logic_fig.add_hline(y=-entry_long, line_dash="dash", line_color="#2ca02c",
+                                     annotation_text="entrada (long)")
+        else:
+            entry_threshold = params.get("entry_threshold")
+            if entry_threshold is not None:
+                logic_fig.add_hline(y=entry_threshold, line_dash="dash", line_color="#d62728",
+                                     annotation_text="entrada")
+                logic_fig.add_hline(y=-entry_threshold, line_dash="dash", line_color="#2ca02c",
+                                     annotation_text="entrada")
+        exit_threshold = params.get("exit_threshold")
+        if exit_threshold is not None:
+            logic_fig.add_hline(y=exit_threshold, line_dash="dot", line_color="gray",
+                                 annotation_text="saída (reversão)")
+            logic_fig.add_hline(y=-exit_threshold, line_dash="dot", line_color="gray")
+        logic_fig.add_hline(y=0, line_color="lightgray")
+
+        # Pontos reais de entrada/saída, a partir dos trades já guardados
+        # (mesma lista usada na curva de equity e na tabela de trades
+        # mais abaixo) — nunca recalculados, só posicionados sobre a série.
+        entries_long = [t["entry_bar"] for t in trades if t["direction"] == 1 and t["entry_bar"] < n_common]
+        entries_short = [t["entry_bar"] for t in trades if t["direction"] == -1 and t["entry_bar"] < n_common]
+        exits = [t["exit_bar"] for t in trades if t["exit_bar"] < n_common]
+        exit_texts = [t["exit_reason"] for t in trades if t["exit_bar"] < n_common]
+
+        if entries_long:
+            logic_fig.add_trace(go.Scatter(
+                x=entries_long, y=[zscore[i] for i in entries_long],
+                mode="markers", name="Entrada (long spread)",
+                marker=dict(symbol="triangle-up", size=11, color="#2ca02c"),
+            ))
+        if entries_short:
+            logic_fig.add_trace(go.Scatter(
+                x=entries_short, y=[zscore[i] for i in entries_short],
+                mode="markers", name="Entrada (short spread)",
+                marker=dict(symbol="triangle-down", size=11, color="#d62728"),
+            ))
+        if exits:
+            logic_fig.add_trace(go.Scatter(
+                x=exits, y=[zscore[i] for i in exits],
+                mode="markers", name="Saída", text=exit_texts, hoverinfo="text+x+y",
+                marker=dict(symbol="x", size=10, color="black"),
+            ))
+
+        logic_fig.update_layout(
+            title=f"Z-score do spread — {row['pair_a']} / {row['pair_b']} ({strategy_type})",
+            height=420, xaxis_title="Barra", yaxis_title="Z-score",
+            margin=dict(t=40, b=20),
+        )
+        st.plotly_chart(logic_fig, use_container_width=True)
+        st.caption(
+            "⚠️ Os pontos de entrada/saída assumem que `output/features_*.parquet` não mudou "
+            "desde que esta estratégia foi testada — se os dados foram atualizados entretanto "
+            "(nova corrida de `data_pipeline.py`), as posições dos pontos podem já não "
+            "corresponder exatamente às barras originais."
+        )
 
 st.markdown("**Estatísticas completas:**")
 stats_cols = {
