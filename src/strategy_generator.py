@@ -145,6 +145,30 @@ def main():
     parser.add_argument("--n-generations", type=int, default=2)
     parser.add_argument("--n-per-generation", type=int, default=9)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--evolutionary", action="store_true", default=False,
+        help="Usa o motor de busca evolutiva (strategy_evolution.py) em vez do loop "
+             "simples de mutação dos 3 melhores — população maior, seleção por "
+             "torneio + crossover, múltiplas famílias de estratégia "
+             "(strategy_variants.py) e paragem antecipada por --patience.",
+    )
+    parser.add_argument("--population-size", type=int, default=200,
+                         help="Só com --evolutionary.")
+    parser.add_argument("--max-generations", type=int, default=40,
+                         help="Só com --evolutionary — teto superior; a busca pode parar antes via --patience.")
+    parser.add_argument("--patience", type=int, default=15,
+                         help="Só com --evolutionary — gerações sem melhoria no melhor "
+                              "profit_factor antes de encerrar esse nicho (par + tipo).")
+    parser.add_argument(
+        "--strategy-types", type=str, default=None,
+        help="Só com --evolutionary — lista separada por vírgulas (ex.: zscore,kalman). "
+             "Default: todas as de strategy_evolution.ALL_STRATEGY_TYPES.",
+    )
+    parser.add_argument(
+        "--journal-path", default=None,
+        help="Só com --evolutionary — ficheiro de texto onde o resumo legível da "
+             "corrida é anexado (default: <output-dir>/strategy_lab_journal.md).",
+    )
     args = parser.parse_args()
 
     hedge_csv = os.path.join(args.output_dir, "hedge_candidates.csv")
@@ -166,6 +190,28 @@ def main():
         price_data[sym] = pd.read_parquet(path)["close"]
 
     db_path = os.path.join(args.output_dir, "strategy_lab.db")
+
+    if args.evolutionary:
+        from strategy_evolution import run_evolutionary_lab
+
+        strategy_types = args.strategy_types.split(",") if args.strategy_types else None
+        journal_path = args.journal_path or os.path.join(args.output_dir, "strategy_lab_journal.md")
+        print(f"A testar {len(pairs)} par(es) com busca evolutiva: {pairs}")
+        run_evolutionary_lab(
+            pairs, price_data, db_path,
+            strategy_types=strategy_types,
+            population_size=args.population_size,
+            max_generations=args.max_generations,
+            patience=args.patience,
+            seed=args.seed,
+            journal_path=journal_path,
+        )
+        print(
+            f"Concluído (busca evolutiva). Resultados em {db_path}, diário em {journal_path} "
+            "— corre `streamlit run dashboard.py` para validar."
+        )
+        return
+
     print(f"A testar {len(pairs)} par(es): {pairs}")
     run_strategy_lab(
         pairs, price_data, db_path,

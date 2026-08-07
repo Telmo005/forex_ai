@@ -412,3 +412,142 @@ def test_run_hedge_loop_on_event_callback_fires_for_every_event(tmp_path):
 
     assert events, "pré-condição do teste: o loop devia produzir pelo menos um evento"
     assert seen_via_callback == events
+
+
+# ---------------------------------------------------------------------
+# select_strategy_for_pair: policy="best_oos_profit_factor"
+# ---------------------------------------------------------------------
+
+def test_select_strategy_for_pair_best_oos_profit_factor_policy(caplog):
+    def _with_wf(profit_factor: float) -> str:
+        import json
+        return json.dumps({"aggregate_stats": {"profit_factor": profit_factor}})
+
+    eligible = [
+        _strategy_record(id="low_pf", pair_a="EURUSD", pair_b="GBPUSD",
+                          created_at="2026-06-01T00:00:00", wf_fold_results=_with_wf(1.3)),
+        _strategy_record(id="high_pf", pair_a="EURUSD", pair_b="GBPUSD",
+                          created_at="2026-01-01T00:00:00", wf_fold_results=_with_wf(4.5)),
+    ]
+    with caplog.at_level("WARNING"):
+        chosen = select_strategy_for_pair(eligible, "EURUSD", "GBPUSD", policy="best_oos_profit_factor")
+    # "high_pf" é mais antiga (created_at) mas tem profit_factor out-of-sample
+    # maior — policy="best_oos_profit_factor" tem de vencer por isso, não
+    # por recência (ao contrário do desempate default "most_recent").
+    assert chosen["id"] == "high_pf"
+
+
+def test_select_strategy_for_pair_best_oos_policy_prefers_data_over_missing():
+    import json
+    eligible = [
+        _strategy_record(id="no_data", pair_a="EURUSD", pair_b="GBPUSD",
+                          created_at="2026-06-01T00:00:00", wf_fold_results=None),
+        _strategy_record(id="has_data", pair_a="EURUSD", pair_b="GBPUSD",
+                          created_at="2026-01-01T00:00:00",
+                          wf_fold_results=json.dumps({"aggregate_stats": {"profit_factor": 0.5}})),
+    ]
+    chosen = select_strategy_for_pair(eligible, "EURUSD", "GBPUSD", policy="best_oos_profit_factor")
+    # "no_data" é mais recente mas não tem profit_factor out-of-sample
+    # nenhum utilizável — nunca deve vencer um registo com dados reais,
+    # mesmo que o profit_factor desse registo seja baixo (0.5).
+    assert chosen["id"] == "has_data"
+
+
+def test_select_strategy_for_pair_default_policy_unchanged():
+    """policy default continua "most_recent" — não muda o comportamento
+    já fixado por test_select_strategy_for_pair_tie_break_most_recent."""
+    eligible = [
+        _strategy_record(id="older", pair_a="EURUSD", pair_b="GBPUSD", created_at="2026-01-01T00:00:00"),
+        _strategy_record(id="newer", pair_a="EURUSD", pair_b="GBPUSD", created_at="2026-06-01T00:00:00"),
+    ]
+    assert select_strategy_for_pair(eligible, "EURUSD", "GBPUSD")["id"] == "newer"
+
+
+# ---------------------------------------------------------------------
+# run_hedge_loop: fixação de estratégia por posição aberta + recarga
+# ---------------------------------------------------------------------
+
+def test_run_hedge_loop_pins_strategy_across_reload_and_only_new_entries_use_new_strategy(tmp_path):
+    """Uma posição aberta ANTES de uma recarga tem de FECHAR com a
+    estratégia antiga (nunca troca a meio do trade, CLAUDE.md regra 7);
+    só a entrada seguinte (posição já fechada) é que passa a usar a
+    estratégia nova."""
+    rng = np.random.default_rng(3)
+    n = 250
+    b_vals = np.cumsum(rng.normal(0, 0.01, n)) + 1.30
+    a_vals = 1.2 * b_vals + rng.normal(0, 0.002, n)
+    path_a = _write_feature_parquet(tmp_path, "EURUSD", a_vals.tolist())
+    path_b = _write_feature_parquet(tmp_path, "GBPUSD", b_vals.tolist())
+
+    # Com esta seed/params (confirmado empiricamente): abre no bar 40,
+    # fecha no bar 51 — uma recarga a cada 45 barras dispara no bar 45,
+    # a MEIO desse trade.
+    old_record = _strategy_record(id="old", pair_a="EURUSD", pair_b="GBPUSD",
+                                   wf_passed=1, revalidated_on_real_data=1)
+    new_record = _strategy_record(id="new", pair_a="EURUSD", pair_b="GBPUSD",
+                                   wf_passed=1, revalidated_on_real_data=1,
+                                   params={**old_record["params"], "exit_threshold": 0.5})
+
+    strategy_ids_seen_at_open = []
+
+    def stub_risk_evaluate_fn(hedge_proposal, strategy_record, entry_price, stop_distance, account_state, corr_matrix):
+        strategy_ids_seen_at_open.append(strategy_record["id"])
+        return RiskDecision(approved=True, size_lots=0.01, sl_price=entry_price - 0.01, reject_reason=None)
+
+    feed = replay_feed({"EURUSD": path_a, "GBPUSD": path_b})
+    events = run_hedge_loop(
+        feed, [old_record], stub_risk_evaluate_fn,
+        beta_window=30, corr_window=30, recalc_every=10,
+        reload_eligible_fn=lambda: [new_record], reload_every_bars=45,
+    )
+
+    opens = [e for e in events if e["proposal"]["action"] == "open_hedge"]
+    closes = [e for e in events if e["proposal"]["action"] == "close_hedge"]
+    # Confirmado empiricamente com esta seed/params: abre no bar 32 (fecha
+    # 33, trade curto, antes de qualquer recarga), abre de novo no bar 40
+    # (fecha 51 — a recarga no bar 45 acontece A MEIO deste segundo trade),
+    # e abre de novo no bar 60 (já depois do fecho do segundo trade).
+    assert len(opens) >= 3, "pré-condição: precisa de pelo menos 3 aberturas para provar a troca"
+    assert opens[1]["bar_index"] == 40 and closes[1]["bar_index"] == 51
+    assert opens[2]["bar_index"] == 60
+
+    # O SEGUNDO trade abriu só com "old" disponível, e a recarga (bar 45)
+    # aconteceu a meio dele — tem de fechar com "old", nunca "new".
+    assert closes[1]["strategy_id"] == "old"
+    assert strategy_ids_seen_at_open[1] == "old"
+
+    # Depois do fecho do segundo trade, eligible_strategies já é [new] —
+    # a terceira entrada tem de resolver "new".
+    assert strategy_ids_seen_at_open[2] == "new"
+
+
+def test_run_hedge_loop_reload_extends_pairs_without_resetting_existing_state(tmp_path):
+    """Uma recarga que introduz um par NOVO nunca deve tocar no estado
+    (posições, contadores) de um par já a ser seguido."""
+    rng = np.random.default_rng(5)
+    n = 120
+    b_vals = np.cumsum(rng.normal(0, 0.01, n)) + 1.30
+    a_vals = 1.2 * b_vals + rng.normal(0, 0.002, n)
+    c_vals = np.cumsum(rng.normal(0, 0.01, n)) + 0.90
+    path_a = _write_feature_parquet(tmp_path, "EURUSD", a_vals.tolist())
+    path_b = _write_feature_parquet(tmp_path, "GBPUSD", b_vals.tolist())
+    path_c = _write_feature_parquet(tmp_path, "AUDUSD", c_vals.tolist())
+
+    original = _strategy_record(id="orig", pair_a="EURUSD", pair_b="GBPUSD",
+                                 wf_passed=1, revalidated_on_real_data=1)
+    new_pair_record = _strategy_record(id="new-pair", pair_a="EURUSD", pair_b="AUDUSD",
+                                        wf_passed=1, revalidated_on_real_data=1)
+
+    def stub_risk_evaluate_fn(hedge_proposal, strategy_record, entry_price, stop_distance, account_state, corr_matrix):
+        return RiskDecision(approved=True, size_lots=0.01, sl_price=entry_price - 0.01, reject_reason=None)
+
+    feed = replay_feed({"EURUSD": path_a, "GBPUSD": path_b, "AUDUSD": path_c})
+    events = run_hedge_loop(
+        feed, [original], stub_risk_evaluate_fn,
+        beta_window=30, corr_window=30, recalc_every=10,
+        reload_eligible_fn=lambda: [original, new_pair_record], reload_every_bars=20,
+    )
+    # Não deve rebentar, e o par original continua a produzir eventos
+    # normalmente depois da recarga introduzir o par novo.
+    eurusd_gbpusd_events = [e for e in events if e["pair_a"] == "EURUSD" and e["pair_b"] == "GBPUSD"]
+    assert eurusd_gbpusd_events

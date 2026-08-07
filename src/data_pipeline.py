@@ -114,6 +114,13 @@ def fetch_mt5(symbol: str, timeframe: str, n_bars: int,
     if not mt5.initialize(**init_kwargs):
         raise RuntimeError(f"Falha ao inicializar MT5: {mt5.last_error()}")
 
+    # symbol_select garante que o símbolo está ativo no Market Watch antes de
+    # pedir histórico — sem isto, símbolos que a corretora não tem por defeito
+    # visíveis (comum em cruzados menos populares) falham com "Sem dados
+    # retornados" mesmo quando o símbolo existe (bug encontrado em teste
+    # manual 2026-07-29, mesma causa raiz do fix em hedge_engine.live_feed).
+    mt5.symbol_select(symbol, True)
+
     tf_const = getattr(mt5, f"TIMEFRAME_{timeframe}")
     rates = mt5.copy_rates_from_pos(symbol, tf_const, 0, n_bars)
     mt5.shutdown()
@@ -187,7 +194,15 @@ def load_all_symbols(cfg: PipelineConfig, mode: str, mt5_creds: dict) -> dict[st
     for i, sym in enumerate(cfg.symbols):
         log.info(f"Carregando {sym} ({mode})...")
         if mode == "mt5":
-            df = fetch_mt5(sym, cfg.timeframe, cfg.n_bars, **mt5_creds)
+            # Um símbolo individual pode não existir/estar disponível nesta
+            # corretora (ex.: cruzado menos comum) — não deve abortar o
+            # carregamento dos restantes símbolos (bug encontrado em teste
+            # manual 2026-07-29, ao alargar a lista de símbolos testados).
+            try:
+                df = fetch_mt5(sym, cfg.timeframe, cfg.n_bars, **mt5_creds)
+            except RuntimeError as exc:
+                log.warning(f"Símbolo {sym} ignorado (falha ao carregar): {exc}")
+                continue
         else:
             beta = synth_betas.get(sym, 0.5)
             df = fetch_synthetic(sym, cfg.timeframe, cfg.n_bars, seed=42 + i, beta=beta,
@@ -339,11 +354,16 @@ def main():
     parser.add_argument("--server", type=str, default=None)
     parser.add_argument("--n-bars", type=int, default=None,
                          help="Nº de barras de histórico por símbolo (default: PipelineConfig.n_bars, 20000)")
+    parser.add_argument("--symbols", type=str, default=None,
+                         help="Lista de símbolos separada por vírgula (default: PipelineConfig.symbols) "
+                              "— para procurar mais pares candidatos a cointegração")
     args = parser.parse_args()
 
     cfg = PipelineConfig()
     if args.n_bars is not None:
         cfg.n_bars = args.n_bars
+    if args.symbols is not None:
+        cfg.symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     mt5_creds = {"login": args.login, "password": args.password, "server": args.server}
     run_pipeline(cfg, args.mode, mt5_creds)
 

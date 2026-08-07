@@ -56,6 +56,7 @@ input string HedgeTagPrefix        = "HEDGE_";                 // prefixo do com
 
 CTrade   trade;
 bool     g_managementOnlyMode = false;
+int      g_healthyTicksSinceStatus = 0;   // ver OnTimer: confirmação periódica de "tudo bem"
 
 //+------------------------------------------------------------------+
 //| OnInit                                                            |
@@ -107,11 +108,29 @@ void OnTimer()
 
    g_managementOnlyMode = IsHeartbeatStale();
    if(g_managementOnlyMode)
+   {
       Print("AVISO: heartbeat do Python expirado (> ", HeartbeatTimeoutSecs,
             "s) — modo SÓ GESTÃO ativo (sem novas aberturas; posições existentes continuam protegidas pelo seu stop-loss).");
+      g_healthyTicksSinceStatus = 0;
+   }
 
    if(!killSwitchActive && !g_managementOnlyMode)
+   {
       ProcessSignalFile();
+
+      // Confirmação periódica de "tudo bem" (a cada ~60 ciclos de polling,
+      // ex.: 30s com PollingMillis=500ms) — sem isto, um funcionamento
+      // saudável fica em silêncio total, o que na prática é indistinguível
+      // de um EA preso/parado para quem está a observar o log (confusão
+      // reportada em teste manual 2026-07-29). Não é um sinal de risco,
+      // só uma confirmação de vida — nunca substitui o heartbeat real.
+      g_healthyTicksSinceStatus++;
+      if(g_healthyTicksSinceStatus >= 60)
+      {
+         Print("OK: a vigiar normalmente — heartbeat fresco, sem kill-switch, à espera de sinal.");
+         g_healthyTicksSinceStatus = 0;
+      }
+   }
 }
 
 //+------------------------------------------------------------------+

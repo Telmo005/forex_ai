@@ -66,8 +66,11 @@ def _ensure_utf8_console() -> None:
         if (enc is None or enc.lower() != "utf-8") and hasattr(stream, "buffer"):
             setattr(sys, name, io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace"))
 
+import functools
+
 from backtest_engine import resolve_cost_params, walk_forward_validate
 from strategy_registry import list_strategies, save_walk_forward_result
+from strategy_variants import run_backtest_for_type
 
 log = logging.getLogger("revalidate_walk_forward")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -131,7 +134,25 @@ def revalidate_approved_strategies(
             price_a = load_price(pair_a)
             price_b = load_price(pair_b)
 
-            wf_result = walk_forward_validate(price_a, price_b, params, cost_params=cost_params)
+            # strategy_type ausente/NULL (linhas gravadas antes de
+            # src/strategy_variants.py existir) é sempre "zscore" — nunca
+            # inferido de outra forma (mesma disciplina de
+            # strategy_registry.migrate_add_strategy_type_column). NaN é
+            # "truthy" em Python (`nan or "zscore"` devolveria nan, não o
+            # fallback) — por isso o fallback usa pd.isna() explícito, não
+            # um "or" ingénuo. Sem passar backtest_fn explícito aqui,
+            # walk_forward_validate() revalidaria QUALQUER estratégia com
+            # o molde zscore, mesmo uma testada e aprovada in-sample com
+            # outra lógica (kalman, vol_scaled_exit, asymmetric_bands) —
+            # um veredito de walk-forward sem nenhuma relação com o que
+            # foi realmente gerado.
+            raw_strategy_type = row.get("strategy_type")
+            strategy_type = "zscore" if pd.isna(raw_strategy_type) else raw_strategy_type
+            backtest_fn = functools.partial(run_backtest_for_type, strategy_type)
+
+            wf_result = walk_forward_validate(
+                price_a, price_b, params, cost_params=cost_params, backtest_fn=backtest_fn,
+            )
 
             # Persiste a estrutura COMPLETA (fold_results + aggregate_stats),
             # não só a lista de folds — risk_engine.resolve_kelly_inputs() já
