@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 sys.path.insert(0, REPO_ROOT)
 from backtest_engine import PROFIT_FACTOR_NO_LOSSES_SENTINEL  # noqa: E402
 from feed_health import read_feed_health  # noqa: E402
-from hedge_engine import load_eligible_strategies  # noqa: E402
+from hedge_engine import load_eligible_strategies, select_strategy_for_pair  # noqa: E402
 from process_control import get_pid, is_running, start_process, stop_process  # noqa: E402
 from strategy_registry import init_db, list_strategies  # noqa: E402
 from trade_ledger import list_all_trades  # noqa: E402
@@ -97,6 +97,36 @@ st.caption(
     "não existe nenhuma vista sem custos.**"
 )
 
+CTRL_DATA_PIPELINE = "data_pipeline"
+CTRL_CONTINUOUS_SEARCH = "continuous_search"
+CTRL_LIVE_LOOP = "live_loop"
+
+# ---------------------------------------------------------------------
+# ⚙️ Estado do sistema — resposta direta a "não sei se está a correr ou
+# não, nem se há proteção contra duplicação". Um resumo único e
+# inequívoco de tudo o que está vivo agora, ANTES de qualquer outra
+# secção — nada aqui decide nada, só lê o mesmo `is_running`/`get_pid`
+# que o Painel de controlo já usa (uma só fonte de verdade).
+# ---------------------------------------------------------------------
+st.subheader("⚙️ Estado do sistema")
+status_cols = st.columns(3)
+for status_col, (proc_name, proc_label) in zip(status_cols, [
+    (CTRL_DATA_PIPELINE, "🔄 Atualizar dados MT5"),
+    (CTRL_CONTINUOUS_SEARCH, "🧬 Busca contínua"),
+    (CTRL_LIVE_LOOP, "📡 Ligar ao vivo"),
+]):
+    with status_col:
+        if is_running(proc_name):
+            st.success(f"**{proc_label}**\n\n🟢 A correr (PID {get_pid(proc_name)})")
+        else:
+            st.info(f"**{proc_label}**\n\n⚪ Parado")
+st.caption(
+    "🔒 **Proteção contra duplicação**: cada processo só pode ter UMA instância ativa "
+    "por vez — `process_control.start_process` recusa arrancar um segundo com o mesmo "
+    "nome enquanto o anterior estiver vivo. Nunca correm dois em paralelo por engano."
+)
+st.divider()
+
 # ---------------------------------------------------------------------
 # 🎛️ Painel de controlo — arranca/para os processos de longa duração a
 # partir de um clique, em vez de exigir comandos de terminal. Cada botão
@@ -106,9 +136,25 @@ st.caption(
 # ---------------------------------------------------------------------
 st.subheader("🎛️ Painel de controlo")
 
-CTRL_DATA_PIPELINE = "data_pipeline"
-CTRL_CONTINUOUS_SEARCH = "continuous_search"
-CTRL_LIVE_LOOP = "live_loop"
+
+def _start_with_feedback(name: str, cmd: list[str], label: str) -> None:
+    """Arranca um processo do painel de controlo com feedback GARANTIDO
+    — nunca falha em silêncio. `process_control.start_process` pode
+    levantar (ex.: RuntimeError se já houver um "name" vivo, ou um erro
+    do SO se o comando/pasta for inválido); sem este wrapper, essa
+    exceção rebentava o script inteiro do Streamlit com um traceback
+    cru, o que pareceu ao utilizador "o botão não faz nada" em vez de um
+    erro claro (relatado 2026-08 na VPS). Em sucesso, confirma com
+    `st.toast` (visível por alguns segundos, sobrevive ao st.rerun()
+    seguinte) para nunca ficar ambíguo se o clique teve efeito."""
+    try:
+        pid = start_process(name, cmd, cwd=REPO_ROOT)
+    except Exception as exc:
+        st.error(f"❌ Falha ao iniciar '{label}': {exc}")
+        return
+    st.toast(f"✅ '{label}' iniciado (PID {pid})", icon="✅")
+    st.rerun()
+
 
 ctrl1, ctrl2, ctrl3 = st.columns(3)
 
@@ -124,12 +170,11 @@ with ctrl1:
                 st.rerun()
         else:
             if st.button("▶️ Atualizar agora", key="start_data_pipeline"):
-                start_process(
+                _start_with_feedback(
                     CTRL_DATA_PIPELINE,
                     [sys.executable, os.path.join("src", "data_pipeline.py"), "--mode", "mt5"],
-                    cwd=REPO_ROOT,
+                    "Atualizar dados do MT5",
                 )
-                st.rerun()
 
 with ctrl2:
     with st.container(border=True):
@@ -147,13 +192,12 @@ with ctrl2:
                 st.rerun()
         else:
             if st.button("▶️ Iniciar busca contínua", key="start_continuous_search"):
-                start_process(
+                _start_with_feedback(
                     CTRL_CONTINUOUS_SEARCH,
                     [sys.executable, os.path.join("scripts", "run_continuous_strategy_search.py"),
                      "--confirm-real-data", "--auto-refresh-mt5"],
-                    cwd=REPO_ROOT,
+                    "Busca contínua de estratégias",
                 )
-                st.rerun()
 
 with ctrl3:
     with st.container(border=True):
@@ -195,14 +239,100 @@ with ctrl3:
         else:
             st.info(f"{n_eligible} estratégia(s) elegível(is) — pronta(s) a negociar.")
             confirm_demo = st.checkbox("Confirmo que esta é uma conta DEMO", key="confirm_demo_account")
+            if not confirm_demo:
+                st.caption("🔒 O botão só desbloqueia depois de marcares a checkbox acima.")
             if st.button("▶️ Ligar ao vivo", key="start_live_loop", disabled=not confirm_demo):
-                start_process(
+                _start_with_feedback(
                     CTRL_LIVE_LOOP,
                     [sys.executable, os.path.join("scripts", "run_live_hedge_loop.py"),
                      "--reload-every-bars", "50", "--selection-policy", "best_oos_profit_factor"],
-                    cwd=REPO_ROOT,
+                    "Ligar ao MT5 ao vivo",
                 )
-                st.rerun()
+
+st.divider()
+
+# ---------------------------------------------------------------------
+# 🏆 Estratégias elegíveis (campeãs) — pedido explícito do utilizador
+# (2026-08): "temos estratégias que já funcionam mas eu mal consigo
+# ver". Mostra TODAS as `load_eligible_strategies()` (a mesma fonte que
+# o Painel de controlo já usa para decidir se "Ligar ao vivo"
+# desbloqueia), com a estratégia CAMPEÃ de cada par destacada — exatamente
+# a que `hedge_engine.select_strategy_for_pair` resolveria agora, a
+# MESMA lógica que `run_live_hedge_loop.py` usa em produção. Nunca
+# inventa valores em dinheiro — fica em "R", a unidade já estabelecida
+# no resto do projeto (não há execução real ainda para converter).
+# ---------------------------------------------------------------------
+st.subheader("🏆 Estratégias elegíveis (campeãs)")
+
+eligible_strategies = load_eligible_strategies(DB_PATH) if os.path.exists(DB_PATH) else []
+
+if not eligible_strategies:
+    st.info(
+        "Ainda 0 estratégias elegíveis — a busca contínua tem de encontrar e validar "
+        "(in-sample + walk-forward out-of-sample + dados reais) pelo menos uma primeiro."
+    )
+else:
+    def _oos_stats(record: dict) -> dict:
+        """Estatísticas out-of-sample (walk-forward) se existirem — nunca
+        as in-sample da geração original, que sobrestimam sistematicamente
+        o edge real (mesma disciplina de risk_engine.resolve_kelly_inputs)."""
+        raw = record.get("wf_fold_results")
+        if raw:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(parsed, dict) and parsed.get("aggregate_stats"):
+                return parsed["aggregate_stats"]
+        return {
+            "total_trades": record.get("total_trades", 0) or 0,
+            "win_rate": record.get("win_rate", 0.0) or 0.0,
+            "profit_factor": record.get("profit_factor", 0.0) or 0.0,
+            "total_return_r": record.get("total_return_r", 0.0) or 0.0,
+        }
+
+    unique_pairs = sorted({(s["pair_a"], s["pair_b"]) for s in eligible_strategies})
+    champions = {}
+    for pair_a, pair_b in unique_pairs:
+        champion = select_strategy_for_pair(eligible_strategies, pair_a, pair_b)
+        if champion is not None:
+            champions[(pair_a, pair_b)] = champion
+
+    champion_oos = {pair: _oos_stats(rec) for pair, rec in champions.items()}
+    total_return_champions = sum(s["total_return_r"] for s in champion_oos.values())
+    total_trades_champions = sum(s["total_trades"] for s in champion_oos.values())
+    total_wins_champions = sum(round(s["win_rate"] * s["total_trades"]) for s in champion_oos.values())
+    total_losses_champions = total_trades_champions - total_wins_champions
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Estratégias elegíveis", len(eligible_strategies))
+    m2.metric("Pares com campeão", len(champions))
+    m3.metric("Retorno total campeões (R, OOS)", f"{total_return_champions:.2f}")
+    m4.metric("Trades ganhos (campeões, OOS)", int(total_wins_champions))
+    m5.metric("Trades perdidos (campeões, OOS)", int(total_losses_champions))
+    st.caption(
+        "Métricas dos campeões são out-of-sample (walk-forward) quando disponíveis — "
+        "nunca in-sample, que sobrestima o edge real. Unidade 'R' = múltiplos do "
+        "desvio-padrão do spread na entrada, a mesma usada em todo o projeto — ainda "
+        "não há execução real, por isso não existe valor em dinheiro real para mostrar."
+    )
+
+    rows = []
+    for s in eligible_strategies:
+        pair = (s["pair_a"], s["pair_b"])
+        is_champion = champions.get(pair, {}).get("id") == s["id"]
+        oos = _oos_stats(s)
+        rows.append({
+            "🏆": "🏆" if is_champion else "",
+            "id": s["id"], "Par A": s["pair_a"], "Par B": s["pair_b"],
+            "Tipo": s.get("strategy_type") or "zscore",
+            "Nº trades (OOS)": oos["total_trades"],
+            "Win rate (OOS)": oos["win_rate"],
+            "Profit factor (OOS)": oos["profit_factor"],
+            "Retorno (R, OOS)": oos["total_return_r"],
+        })
+    eligible_df = pd.DataFrame(rows).sort_values(["🏆", "Retorno (R, OOS)"], ascending=[False, False])
+    st.dataframe(
+        eligible_df, use_container_width=True, hide_index=True,
+        height=min(450, 60 + 35 * len(eligible_df)),
+    )
 
 st.divider()
 
@@ -268,8 +398,14 @@ with st.container(border=True):
         m3.metric("Trades ganhos (recente)", wins_recent)
         m4.metric("Trades perdidos (recente)", losses_recent)
 
-        st.caption("Últimas estratégias testadas (mais recente primeiro):")
-        last_n = df.sort_values("created_at", ascending=False).head(15).copy()
+        n_available = len(df)
+        min_n = min(10, n_available)
+        show_n = st.number_input(
+            "Mostrar últimas N estratégias testadas", min_value=min_n, max_value=n_available,
+            value=max(min(100, n_available), min_n), step=10, key="ao_vivo_show_n",
+            help="Sem limite escondido — sobe até ao total de estratégias já testadas.",
+        )
+        last_n = df.sort_values("created_at", ascending=False).head(int(show_n)).copy()
         if "strategy_type" not in last_n.columns:
             last_n["strategy_type"] = None
         last_n["strategy_type"] = last_n["strategy_type"].fillna("zscore")
@@ -332,8 +468,15 @@ else:
         )
 
     if len(closed_trades):
-        st.markdown("**Últimas operações fechadas:**")
-        closed_display = closed_trades.head(20)[[
+        st.markdown("**Operações fechadas:**")
+        n_closed_available = len(closed_trades)
+        min_closed_n = min(20, n_closed_available)
+        show_closed_n = st.number_input(
+            "Mostrar últimas N operações fechadas", min_value=min_closed_n, max_value=n_closed_available,
+            value=min_closed_n, step=10, key="operacoes_show_n",
+            help="Sem limite escondido — sobe até ao total de operações já fechadas.",
+        )
+        closed_display = closed_trades.head(int(show_closed_n))[[
             "pair_a", "pair_b", "direction", "entry_timestamp", "exit_timestamp", "exit_reason", "pnl_r",
         ]].copy()
         closed_display["direction"] = closed_display["direction"].map({1: "Long spread", -1: "Short spread"})

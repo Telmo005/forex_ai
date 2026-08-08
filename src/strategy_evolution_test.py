@@ -18,6 +18,7 @@ Uso:
 
 from __future__ import annotations
 
+import json
 import random
 
 import numpy as np
@@ -30,6 +31,7 @@ from strategy_evolution import (
     _crossover,
     _mutate,
     _random_params,
+    refine_champion,
     run_evolutionary_lab,
 )
 from strategy_registry import list_strategies
@@ -168,3 +170,84 @@ def test_run_evolutionary_lab_unknown_strategy_type_raises(tmp_path):
             db_path=db_path, strategy_types=["nao_existe"],
             population_size=2, max_generations=1, log=lambda *a, **k: None,
         )
+
+
+# ---------------------------------------------------------------------
+# refine_champion: busca local semeada a partir de uma estratégia já
+# campeã, em vez de _random_params() do zero (pedido do utilizador
+# 2026-08: refinar especificamente o que já está em produção)
+# ---------------------------------------------------------------------
+
+CHAMPION_PARAMS = {
+    "entry_threshold": 2.0, "exit_threshold": 0.3, "min_correlation": 0.5,
+    "max_hold_bars": 80, "beta_window": 300, "corr_window": 150, "recalc_every": 50,
+}
+
+
+def test_refine_champion_persists_champion_unchanged_in_generation_zero(tmp_path):
+    price_a, price_b = _synthetic_pair()
+    db_path = str(tmp_path / "lab.db")
+
+    refine_champion(
+        "EURUSD", "AUDUSD", "zscore", CHAMPION_PARAMS, price_a, price_b, db_path,
+        population_size=6, max_generations=2, patience=1, seed=7,
+        log=lambda *a, **k: None,
+    )
+
+    df = list_strategies(db_path)
+    gen0 = df[df["generation"] == 0]
+    gen0_params = [json.loads(p) if isinstance(p, str) else p for p in gen0["params"]]
+    assert any(p == CHAMPION_PARAMS for p in gen0_params), (
+        "o próprio campeão (parâmetros exatos) tem de estar entre os candidatos "
+        "testados na geração 0 — nunca só vizinhos mutados"
+    )
+
+
+def test_refine_champion_neighbors_stay_within_declared_ranges(tmp_path):
+    price_a, price_b = _synthetic_pair()
+    db_path = str(tmp_path / "lab.db")
+    ranges = ALL_PARAM_RANGES["zscore"]
+
+    refine_champion(
+        "EURUSD", "AUDUSD", "zscore", CHAMPION_PARAMS, price_a, price_b, db_path,
+        population_size=8, max_generations=3, patience=2, mutation_strength=0.08, seed=9,
+        log=lambda *a, **k: None,
+    )
+
+    df = list_strategies(db_path)
+    for raw in df["params"]:
+        params = json.loads(raw) if isinstance(raw, str) else raw
+        for key, (lo, hi) in ranges.items():
+            assert lo <= params[key] <= hi, (key, params[key])
+
+
+def test_refine_champion_persists_every_candidate_tested(tmp_path):
+    price_a, price_b = _synthetic_pair()
+    db_path = str(tmp_path / "lab.db")
+
+    summary = refine_champion(
+        "EURUSD", "AUDUSD", "zscore", CHAMPION_PARAMS, price_a, price_b, db_path,
+        population_size=5, max_generations=2, patience=1, seed=3,
+        log=lambda *a, **k: None,
+    )
+
+    df = list_strategies(db_path)
+    assert len(df) == summary["n_tested"]
+    assert summary["pair_a"] == "EURUSD" and summary["pair_b"] == "AUDUSD"
+    assert summary["strategy_type"] == "zscore"
+
+
+def test_refine_champion_writes_journal_when_path_given(tmp_path):
+    price_a, price_b = _synthetic_pair()
+    db_path = str(tmp_path / "lab.db")
+    journal_path = str(tmp_path / "journal.md")
+
+    refine_champion(
+        "EURUSD", "AUDUSD", "zscore", CHAMPION_PARAMS, price_a, price_b, db_path,
+        population_size=4, max_generations=1, patience=1, seed=1,
+        journal_path=journal_path, log=lambda *a, **k: None,
+    )
+
+    with open(journal_path, encoding="utf-8") as f:
+        content = f.read()
+    assert "EURUSD/AUDUSD" in content

@@ -127,10 +127,22 @@ def _run_niche(
     db_path: str, population_size: int, max_generations: int, patience: int,
     tournament_size: int, elite_fraction: float, min_trades_for_fitness: int,
     rng: random.Random, log,
+    initial_population: list[dict] | None = None,
+    mutation_strength: float = 0.2,
 ) -> dict:
+    """`initial_population`/`mutation_strength` (opcionais, default = comportamento
+    antigo exato) permitem a `refine_champion()` reusar TODO este loop genético
+    sem duplicar nada: semear a partir de um campeão persistido em vez de
+    `_random_params()` do zero, e mutar com passos mais finos em vez do
+    default de exploração ampla — nunca dois caminhos divergentes de "como
+    evoluir uma população"."""
     cost_params = resolve_cost_params(pair_a, pair_b)
 
-    population = [_random_params(strategy_type, rng) for _ in range(population_size)]
+    if initial_population is not None:
+        population = list(initial_population)
+        population_size = len(population)
+    else:
+        population = [_random_params(strategy_type, rng) for _ in range(population_size)]
     parent_ids: list[str | None] = [None] * population_size
 
     best_ever: dict | None = None
@@ -219,7 +231,7 @@ def _run_niche(
             parent_a_record = _tournament()
             parent_b_record = _tournament()
             child = _crossover(strategy_type, parent_a_record["params"], parent_b_record["params"], rng)
-            child = _mutate(strategy_type, child, rng)
+            child = _mutate(strategy_type, child, rng, strength=mutation_strength)
             next_population.append(child)
             next_parent_ids.append(parent_a_record["id"])
 
@@ -285,6 +297,76 @@ def run_evolutionary_lab(
         _write_journal(journal_path, niche_summaries)
 
     return niche_summaries
+
+
+# --------------------------------------------------------------------------
+# Refinamento dedicado da estratégia CAMPEÃ (pedido explícito do utilizador,
+# 2026-08: "um motor à parte que fosse melhorar a estratégia até ficar
+# perfeita") — nunca substitui run_evolutionary_lab(), que continua a
+# explorar candidatos novos do zero; isto é um SEGUNDO modo, focado, que dá
+# continuidade entre ciclos ao que já é campeão em produção, em vez de cada
+# ciclo da busca contínua recomeçar às cegas a partir de _random_params().
+# --------------------------------------------------------------------------
+
+DEFAULT_REFINE_MUTATION_STRENGTH = 0.08  # bem menor que o default de exploração ampla (0.2)
+
+
+def refine_champion(
+    pair_a: str, pair_b: str, strategy_type: str, champion_params: dict,
+    price_a: pd.Series, price_b: pd.Series, db_path: str,
+    population_size: int = 30,
+    max_generations: int = 20,
+    patience: int = 8,
+    mutation_strength: float = DEFAULT_REFINE_MUTATION_STRENGTH,
+    tournament_size: int = 4,
+    elite_fraction: float = 0.1,
+    min_trades_for_fitness: int = 10,
+    seed: int = 42,
+    journal_path: str | None = None,
+    log=print,
+) -> dict:
+    """Busca LOCAL à volta dos parâmetros exatos da estratégia já campeã
+    (`champion_params`, tipicamente vindos de `strategy_registry.get_strategy`
+    para o id que `hedge_engine.select_strategy_for_pair` resolveu como
+    vigente) — a população inicial é o próprio campeão intacto (garante que
+    nunca perde o que já tinha) + vizinhos próximos por mutação fina, em vez
+    de `_random_params()` a explorar o espaço todo.
+
+    Reusa `_run_niche()` tal-e-qual (via `initial_population`/
+    `mutation_strength`) — o gate de aprovação (validate_strategy) e a
+    persistência (save_strategy) são EXATAMENTE os mesmos da busca ampla;
+    um refinamento só passa a candidato a substituir o campeão se, mais
+    tarde, também passar walk-forward out-of-sample como qualquer outro
+    (CLAUDE.md regra 2/7 — nenhum atalho aqui).
+
+    params:
+        champion_params (dict) - parâmetros exatos da estratégia campeã atual
+            para este (pair_a, pair_b, strategy_type); nunca inventados,
+            sempre lidos de um registo já persistido.
+
+    devolve:
+        dict - mesma forma do resumo de _run_niche() (best, best_passed,
+            n_tested, fail_reason_counter, ...), para reusar _write_journal
+            sem alteração.
+    """
+    init_db(db_path)
+    rng = random.Random(seed)
+    initial_population = [dict(champion_params)] + [
+        _mutate(strategy_type, champion_params, rng, strength=mutation_strength)
+        for _ in range(max(0, population_size - 1))
+    ]
+
+    summary = _run_niche(
+        pair_a, pair_b, price_a, price_b, strategy_type, db_path,
+        population_size, max_generations, patience,
+        tournament_size, elite_fraction, min_trades_for_fitness, rng, log,
+        initial_population=initial_population, mutation_strength=mutation_strength,
+    )
+
+    if journal_path:
+        _write_journal(journal_path, [summary])
+
+    return summary
 
 
 def _write_journal(journal_path: str, summaries: list[dict]) -> None:

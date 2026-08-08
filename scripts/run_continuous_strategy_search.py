@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import logging
 import os
 import sys
@@ -67,12 +68,15 @@ log = logging.getLogger("run_continuous_strategy_search")
 import pandas as pd  # noqa: E402
 
 from data_pipeline import PipelineConfig, run_pipeline  # noqa: E402
-from hedge_engine import load_eligible_strategies  # noqa: E402
+from hedge_engine import load_eligible_strategies, select_strategy_for_pair  # noqa: E402
 from revalidate_walk_forward import revalidate_approved_strategies  # noqa: E402
-from strategy_evolution import ALL_STRATEGY_TYPES, run_evolutionary_lab  # noqa: E402
+from strategy_evolution import ALL_STRATEGY_TYPES, refine_champion, run_evolutionary_lab  # noqa: E402
 
 STALE_WARNING_HOURS_DEFAULT = 24.0
 REFRESH_MT5_EVERY_HOURS_DEFAULT = 1.0
+REFINE_POPULATION_SIZE_DEFAULT = 30
+REFINE_MAX_GENERATIONS_DEFAULT = 20
+REFINE_PATIENCE_DEFAULT = 8
 
 
 def _warn_if_stale(path: str, stale_warning_hours: float) -> None:
@@ -172,6 +176,69 @@ def _load_pairs_and_prices(output_dir: str, max_pairs: int) -> tuple[list[tuple[
     return pairs, price_data
 
 
+def _load_price_series(output_dir: str, symbol: str) -> pd.Series:
+    return pd.read_parquet(os.path.join(output_dir, f"features_{symbol}.parquet"))["close"]
+
+
+def _refine_all_champions(
+    output_dir: str, db_path: str, journal_path: str,
+    population_size: int, max_generations: int, patience: int,
+    seed: int, log,
+) -> None:
+    """Pedido explícito do utilizador (2026-08): "um motor à parte que
+    fosse melhorar a estratégia até ficar perfeita" — para cada par com
+    uma estratégia CAMPEÃ atual (elegível e resolvida por
+    `hedge_engine.select_strategy_for_pair`, a MESMA resolução que
+    `run_live_hedge_loop.py` usaria neste instante), corre
+    `strategy_evolution.refine_champion()` semeado a partir dos
+    parâmetros exatos dessa estratégia — nunca de `_random_params()` do
+    zero. Independente de `pairs`/`price_data` do ciclo (que só cobre
+    pares ATUALMENTE cointegrados) — um campeão continua elegível mesmo
+    num ciclo em que a cointegração momentaneamente não aparece na lista,
+    porque é HEDGE-03 (hedge_engine.recheck_cointegration) que decide se
+    negoceia agora, não este script.
+
+    Pares sem nenhum campeão ainda são salto silencioso — não há nada
+    para refinar; a busca ampla (run_evolutionary_lab) continua
+    responsável por descobrir o PRIMEIRO candidato elegível de cada par.
+    Uma falha a carregar dados para um par específico (ex.: parquet em
+    falta) é registada e salta só esse par, nunca aborta os restantes.
+    """
+    eligible = load_eligible_strategies(db_path)
+    if not eligible:
+        log.info("refine-champions: 0 estratégia(s) elegível(is) — nada a refinar ainda.")
+        return
+
+    unique_pairs = sorted({(s["pair_a"], s["pair_b"]) for s in eligible})
+    for pair_a, pair_b in unique_pairs:
+        champion = select_strategy_for_pair(eligible, pair_a, pair_b)
+        if champion is None:
+            continue
+
+        strategy_type = champion.get("strategy_type") or "zscore"
+        try:
+            raw_params = champion["params"]
+            champion_params = json.loads(raw_params) if isinstance(raw_params, str) else raw_params
+            price_a = _load_price_series(output_dir, pair_a)
+            price_b = _load_price_series(output_dir, pair_b)
+        except Exception:
+            log.exception(
+                "refine-champions: falha a carregar dados para %s/%s — a saltar este par.",
+                pair_a, pair_b,
+            )
+            continue
+
+        log.info(
+            "refine-champions: %s/%s [%s] a refinar campeão id=%s (profit_factor=%s)...",
+            pair_a, pair_b, strategy_type, champion.get("id"), champion.get("profit_factor"),
+        )
+        refine_champion(
+            pair_a, pair_b, strategy_type, champion_params, price_a, price_b, db_path,
+            population_size=population_size, max_generations=max_generations, patience=patience,
+            seed=seed, journal_path=journal_path, log=log.info,
+        )
+
+
 def _cycle_seed(base_seed: int, cycle: int) -> int:
     # Cada ciclo tem de explorar região DIFERENTE do espaço de parâmetros
     # — reusar a mesma seed com os mesmos dados produziria exatamente a
@@ -195,6 +262,10 @@ def run_forever(
     max_cycles: int | None = None,
     auto_refresh_mt5: bool = False,
     refresh_mt5_every_hours: float = REFRESH_MT5_EVERY_HOURS_DEFAULT,
+    refine_champions: bool = True,
+    refine_population_size: int = REFINE_POPULATION_SIZE_DEFAULT,
+    refine_max_generations: int = REFINE_MAX_GENERATIONS_DEFAULT,
+    refine_patience: int = REFINE_PATIENCE_DEFAULT,
 ) -> None:
     """Loop principal — extraído de main() para ser testável/chamável
     diretamente (ex.: com max_cycles definido, para um teste de fumo
@@ -204,7 +275,15 @@ def run_forever(
     e `--auto-refresh-mt5`): se True, tenta atualizar os dados via MT5
     no início de cada ciclo quando `hedge_candidates.csv` estiver mais
     velho que `refresh_mt5_every_hours` — precisa do terminal aberto;
-    uma falha aqui nunca aborta o ciclo (ver `_maybe_refresh_mt5_data`)."""
+    uma falha aqui nunca aborta o ciclo (ver `_maybe_refresh_mt5_data`).
+
+    `refine_champions` (default True — ver `_refine_all_champions`):
+    depois da busca ampla, refina especificamente cada estratégia já
+    campeã com os seus próprios parâmetros como ponto de partida.
+    Corre SEMPRE que há campeões, independente de `pairs` estar vazio
+    neste ciclo (um campeão continua elegível mesmo sem aparecer na
+    lista de cointegrados momentânea — ver docstring de
+    `_refine_all_champions`)."""
     journal_path = os.path.join(output_dir, "strategy_lab_journal.md")
     cycle = 0
 
@@ -256,6 +335,14 @@ def run_forever(
                     "Ciclo %d concluído: %d estratégia(s) elegível(is) (%s%d desde o início do ciclo).",
                     cycle, n_eligible_after, "+" if delta >= 0 else "", delta,
                 )
+
+            if refine_champions:
+                _refine_all_champions(
+                    output_dir, db_path, journal_path,
+                    refine_population_size, refine_max_generations, refine_patience,
+                    _cycle_seed(base_seed, cycle) + 1_000_000,  # offset: nunca colide com a seed da busca ampla
+                    log,
+                )
         except KeyboardInterrupt:
             raise
         except Exception:
@@ -303,6 +390,17 @@ def main() -> None:
     )
     parser.add_argument("--refresh-mt5-every-hours", type=float, default=REFRESH_MT5_EVERY_HOURS_DEFAULT,
                          help="Só com --auto-refresh-mt5.")
+    parser.add_argument(
+        "--refine-champions", action=argparse.BooleanOptionalAction, default=True,
+        help="Depois da busca ampla, refina cada estratégia já campeã (pedido do "
+             "utilizador 2026-08: 'um motor à parte que fosse melhorar a estratégia "
+             "até ficar perfeita') — semeia a busca com os parâmetros exatos do "
+             "campeão em vez de recomeçar do zero. Ligado por default; "
+             "--no-refine-champions desliga.",
+    )
+    parser.add_argument("--refine-population-size", type=int, default=REFINE_POPULATION_SIZE_DEFAULT)
+    parser.add_argument("--refine-max-generations", type=int, default=REFINE_MAX_GENERATIONS_DEFAULT)
+    parser.add_argument("--refine-patience", type=int, default=REFINE_PATIENCE_DEFAULT)
     args = parser.parse_args()
 
     db_path = args.db or os.path.join(args.output_dir, "strategy_lab.db")
@@ -333,6 +431,10 @@ def main() -> None:
             args.sleep_seconds, args.stale_warning_hours, args.seed,
             auto_refresh_mt5=args.auto_refresh_mt5,
             refresh_mt5_every_hours=args.refresh_mt5_every_hours,
+            refine_champions=args.refine_champions,
+            refine_population_size=args.refine_population_size,
+            refine_max_generations=args.refine_max_generations,
+            refine_patience=args.refine_patience,
         )
     except KeyboardInterrupt:
         log.info("Interrompido pelo utilizador.")
