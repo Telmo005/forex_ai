@@ -19,7 +19,7 @@ import sys
 
 import pytest
 
-from src.process_control import get_pid, is_running, start_process, stop_process
+from src.process_control import get_desired_processes, get_pid, is_running, start_process, stop_process
 
 _SLEEP_CMD = [sys.executable, "-c", "import time; time.sleep(10)"]
 
@@ -73,3 +73,57 @@ def test_is_running_cleans_up_orphaned_pid_file_for_dead_process(tmp_path):
 
     assert is_running("orphan", pid_dir=pid_dir) is False
     assert not os.path.exists(os.path.join(pid_dir, "orphan.pid"))
+
+
+# ---------------------------------------------------------------------
+# Marcador "desejado" (get_desired_processes) — base do vigilante
+# (scripts/watchdog.py): distingue "morreu sozinho, reinicia" de "o
+# utilizador pediu para parar, não mexer".
+# ---------------------------------------------------------------------
+
+def test_start_process_registers_as_desired(tmp_path):
+    pid_dir = str(tmp_path / "pids")
+    start_process("t4", _SLEEP_CMD, cwd=str(tmp_path), pid_dir=pid_dir)
+    try:
+        desired = get_desired_processes(pid_dir=pid_dir)
+        assert "t4" in desired
+        assert desired["t4"]["cmd"] == _SLEEP_CMD
+        assert desired["t4"]["cwd"] == str(tmp_path)
+    finally:
+        stop_process("t4", pid_dir=pid_dir)
+
+
+def test_stop_process_clears_desired_marker(tmp_path):
+    pid_dir = str(tmp_path / "pids")
+    start_process("t5", _SLEEP_CMD, pid_dir=pid_dir)
+    stop_process("t5", pid_dir=pid_dir)
+    assert "t5" not in get_desired_processes(pid_dir=pid_dir)
+
+
+def test_stop_process_clears_desired_marker_even_if_already_dead(tmp_path):
+    """Clicar em Parar depois de o processo já ter morrido sozinho tem
+    de limpar o marcador na mesma — senão o vigilante reiniciava algo
+    que o utilizador explicitamente já não quer."""
+    pid_dir = str(tmp_path / "pids")
+    os.makedirs(pid_dir, exist_ok=True)
+    start_process("t6", _SLEEP_CMD, pid_dir=pid_dir)
+    # Simula morte silenciosa: apaga o .pid mas deixa o .cmd.json (como
+    # aconteceria se o processo real tivesse crashado sozinho).
+    os.remove(os.path.join(pid_dir, "t6.pid"))
+
+    stop_process("t6", pid_dir=pid_dir)
+    assert "t6" not in get_desired_processes(pid_dir=pid_dir)
+
+
+def test_get_desired_processes_empty_when_pid_dir_missing(tmp_path):
+    assert get_desired_processes(pid_dir=str(tmp_path / "nao-existe")) == {}
+
+
+def test_get_desired_processes_skips_corrupted_cmd_file(tmp_path):
+    pid_dir = str(tmp_path / "pids")
+    os.makedirs(pid_dir, exist_ok=True)
+    with open(os.path.join(pid_dir, "broken.cmd.json"), "w", encoding="utf-8") as f:
+        f.write("{ isto nao e json valido")
+
+    # Nunca levanta — só ignora a entrada corrompida.
+    assert get_desired_processes(pid_dir=pid_dir) == {}

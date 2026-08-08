@@ -100,6 +100,7 @@ st.caption(
 CTRL_DATA_PIPELINE = "data_pipeline"
 CTRL_CONTINUOUS_SEARCH = "continuous_search"
 CTRL_LIVE_LOOP = "live_loop"
+CTRL_WATCHDOG = "watchdog"
 
 # ---------------------------------------------------------------------
 # ⚙️ Estado do sistema — resposta direta a "não sei se está a correr ou
@@ -109,11 +110,12 @@ CTRL_LIVE_LOOP = "live_loop"
 # que o Painel de controlo já usa (uma só fonte de verdade).
 # ---------------------------------------------------------------------
 st.subheader("⚙️ Estado do sistema")
-status_cols = st.columns(3)
+status_cols = st.columns(4)
 for status_col, (proc_name, proc_label) in zip(status_cols, [
     (CTRL_DATA_PIPELINE, "🔄 Atualizar dados MT5"),
     (CTRL_CONTINUOUS_SEARCH, "🧬 Busca contínua"),
     (CTRL_LIVE_LOOP, "📡 Ligar ao vivo"),
+    (CTRL_WATCHDOG, "🐕 Vigilante"),
 ]):
     with status_col:
         if is_running(proc_name):
@@ -123,7 +125,10 @@ for status_col, (proc_name, proc_label) in zip(status_cols, [
 st.caption(
     "🔒 **Proteção contra duplicação**: cada processo só pode ter UMA instância ativa "
     "por vez — `process_control.start_process` recusa arrancar um segundo com o mesmo "
-    "nome enquanto o anterior estiver vivo. Nunca correm dois em paralelo por engano."
+    "nome enquanto o anterior estiver vivo. Nunca correm dois em paralelo por engano.\n\n"
+    "♻️ **Reinício automático**: enquanto o 🐕 Vigilante estiver ligado, qualquer processo "
+    "que morra sozinho (crash, reinício da VPS) volta a arrancar automaticamente — só "
+    "para mesmo quando clicares em \"Parar\" explicitamente."
 )
 st.divider()
 
@@ -156,7 +161,7 @@ def _start_with_feedback(name: str, cmd: list[str], label: str) -> None:
     st.rerun()
 
 
-ctrl1, ctrl2, ctrl3 = st.columns(3)
+ctrl1, ctrl2, ctrl3, ctrl4 = st.columns(4)
 
 with ctrl1:
     with st.container(border=True):
@@ -247,6 +252,28 @@ with ctrl3:
                     [sys.executable, os.path.join("scripts", "run_live_hedge_loop.py"),
                      "--reload-every-bars", "50", "--selection-policy", "best_oos_profit_factor"],
                     "Ligar ao MT5 ao vivo",
+                )
+
+with ctrl4:
+    with st.container(border=True):
+        st.markdown("**🐕 Vigilante**")
+        st.caption(
+            "Corre `watchdog.py` — reinicia sozinho qualquer processo acima que morra "
+            "inesperadamente (crash, reinício da VPS). Nunca decide arrancar nada por "
+            "conta própria; só devolve à vida o que já foi pedido e ainda não foi parado."
+        )
+        st.info("💡 Sem pré-requisitos — não precisa do MT5 nem de mais nada para correr.")
+        if is_running(CTRL_WATCHDOG):
+            st.success(f"🟢 A correr (PID {get_pid(CTRL_WATCHDOG)})")
+            if st.button("⏹ Parar", key="stop_watchdog"):
+                stop_process(CTRL_WATCHDOG)
+                st.rerun()
+        else:
+            if st.button("▶️ Ligar vigilante", key="start_watchdog"):
+                _start_with_feedback(
+                    CTRL_WATCHDOG,
+                    [sys.executable, os.path.join("scripts", "watchdog.py")],
+                    "Vigilante",
                 )
 
 st.divider()
