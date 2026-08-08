@@ -127,10 +127,12 @@ $mt5Paths = @(
     (Join-Path ${env:ProgramFiles(x86)} "MetaTrader 5\terminal.exe")
 )
 $mt5Found = $false
+$mt5InstallDir = $null
 foreach ($p in $mt5Paths) {
     if ($p -and (Test-Path $p)) {
         Write-Ok "Encontrado em $p"
         $mt5Found = $true
+        $mt5InstallDir = Split-Path $p -Parent
         break
     }
 }
@@ -139,11 +141,68 @@ if (-not $mt5Found) {
 }
 
 # --------------------------------------------------------------------
+# 6. Copiar o EA para a pasta de dados do terminal + compilar (automatico)
+#    Ainda assim NAO consegue: iniciar sessao na conta, confirmar modo
+#    hedging, ativar "Algo Trading", nem anexar o EA a um grafico (isso
+#    e estado de UI do terminal, nao existe forma segura de scriptar).
+# --------------------------------------------------------------------
+if ($mt5Found) {
+    Write-Step "A procurar a(s) pasta(s) de dados do terminal MT5..."
+    $terminalRoot = Join-Path $env:APPDATA "MetaQuotes\Terminal"
+    $dataFolders = @()
+    if (Test-Path $terminalRoot) {
+        $dataFolders = Get-ChildItem -Path $terminalRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName "MQL5\Experts") }
+    }
+
+    if ($dataFolders.Count -eq 0) {
+        Write-Warn2 "Nenhuma pasta de dados de terminal encontrada em '$terminalRoot' - abre o MT5 pelo menos uma vez (para ele se registar) e corre este script de novo para copiar/compilar o EA automaticamente."
+    } else {
+        if ($dataFolders.Count -gt 1) {
+            Write-Warn2 "Mais do que uma instalacao de terminal MT5 encontrada - a copiar o EA para todas ($($dataFolders.Count))."
+        }
+        $metaEditorPath = Join-Path $mt5InstallDir "MetaEditor64.exe"
+        foreach ($folder in $dataFolders) {
+            $expertsDest = Join-Path $folder.FullName "MQL5\Experts\ForexAI"
+            Write-Step "A copiar o EA para '$expertsDest'..."
+            New-Item -ItemType Directory -Path $expertsDest -Force | Out-Null
+            foreach ($f in @("ScalpingEA.mq5", "RiskGuard.mqh", "SignalBridge.mqh")) {
+                Copy-Item -Path (Join-Path $RepoRoot "mql5\$f") -Destination $expertsDest -Force
+            }
+            Write-Ok "Ficheiros copiados."
+
+            if (Test-Path $metaEditorPath) {
+                Write-Step "A compilar ScalpingEA.mq5 via MetaEditor (linha de comandos)..."
+                $eaPath = Join-Path $expertsDest "ScalpingEA.mq5"
+                $ex5Path = Join-Path $expertsDest "ScalpingEA.ex5"
+                # O codigo de saida do MetaEditor NAO segue a convencao habitual
+                # (0=sucesso) - confirmado em teste manual: devolveu 1 mesmo
+                # numa compilacao bem sucedida. O sinal fiavel e o .ex5 ter
+                # sido criado/atualizado DEPOIS deste comando correr, nunca o
+                # exit code nem o ficheiro /log (que nem sempre e gerado a
+                # tempo). Start-Process -Wait bloqueia mesmo ate a MetaEditor
+                # terminar (ao contrario de "&" isolado, cujo timing nao e
+                # garantido para processos GUI como este).
+                $beforeTime = if (Test-Path $ex5Path) { (Get-Item $ex5Path).LastWriteTimeUtc } else { $null }
+                Start-Process -FilePath $metaEditorPath -ArgumentList "/compile:`"$eaPath`"" -Wait -WindowStyle Hidden | Out-Null
+                if ((Test-Path $ex5Path) -and ((Get-Item $ex5Path).LastWriteTimeUtc -ne $beforeTime)) {
+                    Write-Ok "Compilado com sucesso: $ex5Path"
+                } else {
+                    Write-Warn2 "A compilacao pode ter falhado - confirma manualmente no MetaEditor (abre ScalpingEA.mq5 e prime F7)."
+                }
+            } else {
+                Write-Warn2 "MetaEditor64.exe nao encontrado em '$mt5InstallDir' - abre ScalpingEA.mq5 no MetaEditor manualmente e compila com F7."
+            }
+        }
+    }
+}
+
+# --------------------------------------------------------------------
 # Resumo final
 # --------------------------------------------------------------------
-Write-Step "Setup concluido. Falta so o que nenhum script consegue fazer por ti:"
+Write-Step "Setup concluido. Falta so o que nenhum script consegue fazer por ti (sao interacoes manuais do terminal, por design de seguranca do MT5/corretora):"
 Write-Host "  1. Abre o MetaTrader 5, inicia sessao na conta, confirma que o titulo diz 'Hedge'."
-Write-Host "  2. Compila e anexa mql5/ScalpingEA.mq5 a um grafico (ver guia completo do projeto)."
+Write-Host "  2. No Navigator do MT5, arrasta 'ScalpingEA' (ja copiado e compilado) para um grafico."
 Write-Host "  3. Ativa 'Algo Trading' na barra de ferramentas + Tools > Options > Expert Advisors."
 Write-Host "  4. Duplo-clique em iniciar_dashboard.bat."
 Write-Host ""
